@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "core/media.h"
 #include "core/render.h"
 #include "core/tts.h"
 
@@ -409,9 +410,34 @@ void snap_to_beat(Storyboard& board, double target_seconds) {
     for (int i = 0; i < n; i++) board.scenes[static_cast<size_t>(i)].seconds = std::min(kMaxSceneSeconds, give[static_cast<size_t>(i)] * unit);
 }
 
+// The user's own track: starts with the video, loops if it is shorter, fades out with the last scene.
+static std::vector<int16_t> user_music(const Storyboard& b) {
+    auto track = load_audio(b.music_file);
+    double total = total_seconds(b);
+    size_t n = at(total);
+    if (!track || track->size() < 4 || n < 16) return {};
+    size_t frames = track->size() / 2;
+    double fade_in = 0.06, fade_out = std::min(1.6, total * 0.2);
+    std::vector<int16_t> out(n * 2);
+    for (size_t i = 0; i < n; i++) {
+        double t = static_cast<double>(i) / kAudioRate;
+        float f = 1.f;
+        if (t < fade_in) f = static_cast<float>(t / fade_in);
+        if (total - t < fade_out) f = std::min(f, static_cast<float>((total - t) / fade_out));
+        size_t s = i % frames;
+        out[i * 2] = static_cast<int16_t>((*track)[s * 2] * f);
+        out[i * 2 + 1] = static_cast<int16_t>((*track)[s * 2 + 1] * f);
+    }
+    return out;
+}
+
 static std::vector<int16_t> render_music(const Storyboard& input) {
     Storyboard b = input;
     normalize(b);
+    if (!b.music_file.empty()) {
+        auto own = user_music(b);
+        if (!own.empty()) return own;
+    }
     std::string mood_id = resolve_music(b);
     if (mood_id == "none") return {};
     Mood m = mood_of(mood_id);
@@ -623,7 +649,11 @@ std::vector<int16_t> render_soundtrack(const Storyboard& input) {
     Storyboard b = input;
     normalize(b);
     std::vector<int16_t> music = render_music(b);
-    if (!has_narration(b)) return music;
+    if (!has_narration(b)) {
+        if (b.music_volume != 1.0)
+            for (auto& s : music) s = static_cast<int16_t>(std::clamp(s * b.music_volume, -32000.0, 32000.0));
+        return music;
+    }
     double total = total_seconds(b);
     size_t n = at(total);
     if (n < 16) return music;
@@ -663,8 +693,8 @@ std::vector<int16_t> render_soundtrack(const Storyboard& input) {
     };
     for (size_t i = 0; i < n; i++) {
         env += (gate[i] - env) * (gate[i] > env ? attack : release);
-        float mg = bed + (ducked - bed) * env;
-        float v = voice[i] * vgain;
+        float mg = (bed + (ducked - bed) * env) * static_cast<float>(b.music_volume);
+        float v = voice[i] * vgain * static_cast<float>(b.voice_volume);
         float ml = i * 2 < music.size() ? music[i * 2] / 32000.f : 0.f;
         float mr = i * 2 + 1 < music.size() ? music[i * 2 + 1] / 32000.f : 0.f;
         out[i * 2] = static_cast<int16_t>(limit(ml * mg + v) * 32000.f);

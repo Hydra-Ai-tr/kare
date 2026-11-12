@@ -75,6 +75,86 @@ const std::vector<std::string>& motion_ids() {
     return ids;
 }
 
+const std::vector<std::string>& layer_kind_ids() {
+    static const std::vector<std::string> ids = {"text", "image", "box"};
+    return ids;
+}
+
+const std::vector<std::string>& layer_in_ids() {
+    static const std::vector<std::string> ids = {"none", "fade", "rise", "pop", "slide", "type"};
+    return ids;
+}
+
+const std::vector<std::string>& camera_ids() {
+    static const std::vector<std::string> ids = {"auto", "in", "out", "left", "right", "up", "down", "still"};
+    return ids;
+}
+
+const std::vector<std::string>& fit_ids() {
+    static const std::vector<std::string> ids = {"auto", "cover", "contain"};
+    return ids;
+}
+
+const std::vector<std::string>& filter_ids() {
+    static const std::vector<std::string> ids = {"none", "bw", "sepia", "vintage", "warm", "cool", "vivid", "noir", "fade"};
+    return ids;
+}
+
+static int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+bool parse_hex_color(const std::string& hex, unsigned char rgb[3]) {
+    std::string h = !hex.empty() && hex[0] == '#' ? hex.substr(1) : hex;
+    if (h.size() == 3) h = std::string{h[0], h[0], h[1], h[1], h[2], h[2]};
+    if (h.size() != 6) return false;
+    for (int k = 0; k < 3; k++) {
+        int a = hex_digit(h[static_cast<size_t>(k) * 2]), b = hex_digit(h[static_cast<size_t>(k) * 2 + 1]);
+        if (a < 0 || b < 0) return false;
+        rgb[k] = static_cast<unsigned char>(a * 16 + b);
+    }
+    return true;
+}
+
+std::string hex_color(const unsigned char rgb[3]) {
+    static const char* d = "0123456789abcdef";
+    std::string s = "#";
+    for (int k = 0; k < 3; k++) {
+        s.push_back(d[rgb[k] >> 4]);
+        s.push_back(d[rgb[k] & 15]);
+    }
+    return s;
+}
+
+static std::string clean_color(const std::string& c, const std::string& fallback) {
+    unsigned char rgb[3];
+    if (c.empty()) return fallback;
+    return parse_hex_color(c, rgb) ? hex_color(rgb) : fallback;
+}
+
+void normalize_layer(Layer& l) {
+    if (!listed(layer_kind_ids(), l.kind)) l.kind = "text";
+    if (!listed(layer_in_ids(), l.in)) l.in = "fade";
+    if (l.out != "none") l.out = "fade";
+    l.x = std::clamp(l.x, -0.5, 1.5);
+    l.y = std::clamp(l.y, -0.5, 1.5);
+    l.w = std::clamp(l.w, 0.02, 2.0);
+    l.h = std::clamp(l.h, 0.005, 2.0);
+    l.size = std::clamp(l.size, 0.2, 6.0);
+    l.rotation = std::clamp(l.rotation, -180.0, 180.0);
+    l.opacity = std::clamp(l.opacity, 0.0, 1.0);
+    l.radius = std::clamp(l.radius, 0.0, 200.0);
+    l.start = std::clamp(l.start, 0.0, kMaxSceneSeconds);
+    l.end = std::clamp(l.end, 0.0, kMaxSceneSeconds);
+    l.color = clean_color(l.color, "#ffffff");
+    l.fill = clean_color(l.fill, "");
+    if (l.kind == "box" && l.fill.empty()) l.fill = l.color;
+    l.align = std::clamp(l.align, 0, 2);
+}
+
 bool known_style(const std::string& style) {
     return style == "ember" || style == "dusk" || style == "night" || style == "sea" || style == "forest" ||
            style == "neon" || style == "paper" || style == "minimal";
@@ -124,6 +204,11 @@ void normalize(Storyboard& board) {
     if (board.voice.empty()) board.voice = "none";
     board.voice_rate = std::clamp(board.voice_rate, -5, 6);
     if (!listed(caption_ids(), board.captions)) board.captions = "auto";
+    board.music_volume = std::clamp(board.music_volume, 0.0, 2.0);
+    board.voice_volume = std::clamp(board.voice_volume, 0.0, 2.0);
+    board.caption_y = board.caption_y <= 0 ? 0.0 : std::clamp(board.caption_y, 0.08, 0.95);
+    board.caption_size = std::clamp(board.caption_size, 0.5, 2.0);
+    board.caption_color = clean_color(board.caption_color, "#ffd84d");
     if (board.scenes.size() > static_cast<size_t>(kMaxScenes)) board.scenes.resize(static_cast<size_t>(kMaxScenes));
     if (board.scenes.empty()) {
         Scene s;
@@ -144,6 +229,20 @@ void normalize(Storyboard& board) {
         s.title = tidy(s.title);
         s.text = tidy_lines(s.text);
         s.narration = squash_spaces(s.narration);
+        if (!listed(camera_ids(), s.camera)) s.camera = "auto";
+        if (!listed(fit_ids(), s.fit)) s.fit = "auto";
+        s.focus_x = std::clamp(s.focus_x, 0.0, 1.0);
+        s.focus_y = std::clamp(s.focus_y, 0.0, 1.0);
+        s.zoom = std::clamp(s.zoom, 1.0, 3.0);
+        Look& lk = s.look;
+        if (!listed(filter_ids(), lk.filter)) lk.filter = "none";
+        lk.brightness = std::clamp(lk.brightness, -1.0, 1.0);
+        lk.contrast = std::clamp(lk.contrast, -1.0, 1.0);
+        lk.saturation = std::clamp(lk.saturation, -1.0, 1.0);
+        lk.warmth = std::clamp(lk.warmth, -1.0, 1.0);
+        lk.vignette = std::clamp(lk.vignette, 0.0, 1.0);
+        if (s.layers.size() > static_cast<size_t>(kMaxLayers)) s.layers.resize(static_cast<size_t>(kMaxLayers));
+        for (auto& l : s.layers) normalize_layer(l);
     }
     double t = total_seconds(board);
     if (t > kMaxTotalSeconds) scale_duration(board, kMaxTotalSeconds);
@@ -190,6 +289,56 @@ void remove_scene(Storyboard& board, int index) {
     board.scenes.erase(board.scenes.begin() + index);
 }
 
+static Json layer_to_json(const Layer& l) {
+    Json o = Json::obj();
+    o.put("kind", Json::strv(l.kind));
+    if (!l.text.empty()) o.put("text", Json::strv(l.text));
+    if (!l.image.empty()) o.put("image", Json::strv(l.image));
+    o.put("x", Json::numv(l.x));
+    o.put("y", Json::numv(l.y));
+    o.put("w", Json::numv(l.w));
+    o.put("h", Json::numv(l.h));
+    o.put("size", Json::numv(l.size));
+    if (l.rotation != 0) o.put("rotation", Json::numv(l.rotation));
+    o.put("color", Json::strv(l.color));
+    if (!l.fill.empty()) o.put("fill", Json::strv(l.fill));
+    o.put("opacity", Json::numv(l.opacity));
+    if (l.radius > 0) o.put("radius", Json::numv(l.radius));
+    o.put("start", Json::numv(l.start));
+    o.put("end", Json::numv(l.end));
+    o.put("in", Json::strv(l.in));
+    o.put("out", Json::strv(l.out));
+    o.put("bold", Json::boolv(l.bold));
+    o.put("shadow", Json::boolv(l.shadow));
+    o.put("align", Json::numv(l.align));
+    return o;
+}
+
+static Layer layer_from_json(const Json& j) {
+    Layer l;
+    l.kind = j.str("kind", "text");
+    l.text = j.str("text");
+    l.image = j.str("image");
+    l.x = j.num("x", 0.5);
+    l.y = j.num("y", 0.5);
+    l.w = j.num("w", 0.5);
+    l.h = j.num("h", 0.12);
+    l.size = j.num("size", 1.0);
+    l.rotation = j.num("rotation", 0.0);
+    l.color = j.str("color", "#ffffff");
+    l.fill = j.str("fill");
+    l.opacity = j.num("opacity", 1.0);
+    l.radius = j.num("radius", 0.0);
+    l.start = j.num("start", 0.0);
+    l.end = j.num("end", 0.0);
+    l.in = j.str("in", "fade");
+    l.out = j.str("out", "fade");
+    l.bold = j.boolean("bold", true);
+    l.shadow = j.boolean("shadow", true);
+    l.align = static_cast<int>(j.num("align", 1));
+    return l;
+}
+
 std::string story_to_json(const Storyboard& board) {
     Json j = Json::obj();
     j.put("prompt", Json::strv(board.prompt));
@@ -206,6 +355,13 @@ std::string story_to_json(const Storyboard& board) {
     j.put("voice_rate", Json::numv(board.voice_rate));
     j.put("captions", Json::strv(board.captions));
     if (!board.credits.empty()) j.put("credits", Json::strv(board.credits));
+    if (!board.music_file.empty()) j.put("music_file", Json::strv(board.music_file));
+    if (board.music_volume != 1.0) j.put("music_volume", Json::numv(board.music_volume));
+    if (board.voice_volume != 1.0) j.put("voice_volume", Json::numv(board.voice_volume));
+    if (board.caption_y > 0) j.put("caption_y", Json::numv(board.caption_y));
+    if (board.caption_size != 1.0) j.put("caption_size", Json::numv(board.caption_size));
+    if (board.caption_color != "#ffd84d") j.put("caption_color", Json::strv(board.caption_color));
+    if (!board.caption_upper) j.put("caption_upper", Json::boolv(false));
     Json scenes = Json::arr();
     for (const auto& s : board.scenes) {
         Json o = Json::obj();
@@ -220,6 +376,28 @@ std::string story_to_json(const Storyboard& board) {
         if (!s.kicker.empty()) o.put("kicker", Json::strv(s.kicker));
         if (!s.image.empty()) o.put("image", Json::strv(s.image));
         if (!s.narration.empty()) o.put("narration", Json::strv(s.narration));
+        if (s.camera != "auto") o.put("camera", Json::strv(s.camera));
+        if (s.fit != "auto") o.put("fit", Json::strv(s.fit));
+        if (s.focus_x != 0.5 || s.focus_y != 0.5) {
+            o.put("focus_x", Json::numv(s.focus_x));
+            o.put("focus_y", Json::numv(s.focus_y));
+        }
+        if (s.zoom != 1.0) o.put("zoom", Json::numv(s.zoom));
+        if (s.look.active()) {
+            Json lk = Json::obj();
+            lk.put("filter", Json::strv(s.look.filter));
+            lk.put("brightness", Json::numv(s.look.brightness));
+            lk.put("contrast", Json::numv(s.look.contrast));
+            lk.put("saturation", Json::numv(s.look.saturation));
+            lk.put("warmth", Json::numv(s.look.warmth));
+            lk.put("vignette", Json::numv(s.look.vignette));
+            o.put("look", std::move(lk));
+        }
+        if (!s.layers.empty()) {
+            Json arr = Json::arr();
+            for (const auto& l : s.layers) arr.a.push_back(layer_to_json(l));
+            o.put("layers", std::move(arr));
+        }
         scenes.a.push_back(std::move(o));
     }
     j.put("scenes", std::move(scenes));
@@ -248,6 +426,13 @@ bool story_from_json(const std::string& text, Storyboard& board, std::string& er
     b.voice_rate = static_cast<int>(j.num("voice_rate", 0));
     b.captions = j.str("captions", "auto");
     b.credits = j.str("credits");
+    b.music_file = j.str("music_file");
+    b.music_volume = j.num("music_volume", 1.0);
+    b.voice_volume = j.num("voice_volume", 1.0);
+    b.caption_y = j.num("caption_y", 0.0);
+    b.caption_size = j.num("caption_size", 1.0);
+    b.caption_color = j.str("caption_color", "#ffd84d");
+    b.caption_upper = j.boolean("caption_upper", true);
     const Json* scenes = j.field("scenes");
     if (scenes && scenes->type == Json::Arr) {
         for (const auto& item : scenes->a) {
@@ -264,7 +449,23 @@ bool story_from_json(const std::string& text, Storyboard& board, std::string& er
             s.kicker = item.str("kicker");
             s.image = item.str("image");
             s.narration = item.str("narration");
-            if (s.title.empty() && s.text.empty() && s.image.empty() && s.narration.empty()) continue;
+            s.camera = item.str("camera", "auto");
+            s.fit = item.str("fit", "auto");
+            s.focus_x = item.num("focus_x", 0.5);
+            s.focus_y = item.num("focus_y", 0.5);
+            s.zoom = item.num("zoom", 1.0);
+            if (const Json* lk = item.field("look"); lk && lk->type == Json::Obj) {
+                s.look.filter = lk->str("filter", "none");
+                s.look.brightness = lk->num("brightness", 0);
+                s.look.contrast = lk->num("contrast", 0);
+                s.look.saturation = lk->num("saturation", 0);
+                s.look.warmth = lk->num("warmth", 0);
+                s.look.vignette = lk->num("vignette", 0);
+            }
+            if (const Json* ls = item.field("layers"); ls && ls->type == Json::Arr)
+                for (const auto& lj : ls->a)
+                    if (lj.type == Json::Obj) s.layers.push_back(layer_from_json(lj));
+            if (s.title.empty() && s.text.empty() && s.image.empty() && s.narration.empty() && s.layers.empty()) continue;
             b.scenes.push_back(std::move(s));
         }
     }
@@ -292,11 +493,15 @@ bool load_story(const std::string& path, Storyboard& board, std::string& err) {
     if (!story_from_json(text, board, err)) return false;
     size_t slash = path.find_last_of("\\/");
     std::string dir = slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
-    for (auto& s : board.scenes) {
-        const std::string& im = s.image;
+    auto resolve = [&](std::string& im) {
         bool absolute = (im.size() > 1 && im[1] == ':') || (!im.empty() && (im[0] == '\\' || im[0] == '/'));
-        if (!im.empty() && !absolute && !dir.empty()) s.image = dir + im;
+        if (!im.empty() && !absolute && !dir.empty()) im = dir + im;
+    };
+    for (auto& s : board.scenes) {
+        resolve(s.image);
+        for (auto& l : s.layers) resolve(l.image);
     }
+    resolve(board.music_file);
     return true;
 }
 

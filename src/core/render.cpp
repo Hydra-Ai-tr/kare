@@ -1559,11 +1559,11 @@ void draw_media(Ctx& c, const Image& im) {
     float fa = c.W / c.H;
     float dw = ia > fa ? c.H * ia : c.W;
     float dh = ia > fa ? c.H : c.W / ia;
-    float k = c.cam.k * 1.05f;
+    float k = c.cam.k * 1.05f * static_cast<float>(c.s.zoom);
     dw *= k;
     dh *= k;
-    float x = (c.W - dw) * 0.5f + c.cam.ox * 1.4f;
-    float y = (c.H - dh) * 0.5f + c.cam.oy * 1.4f;
+    float x = std::clamp(c.W * 0.5f - static_cast<float>(c.s.focus_x) * dw, c.W - dw, 0.f) + c.cam.ox * 1.4f;
+    float y = std::clamp(c.H * 0.5f - static_cast<float>(c.s.focus_y) * dh, c.H - dh, 0.f) + c.cam.oy * 1.4f;
     draw_image(c.f, im, x, y, dw, dh, 0.f, 1.f);
     darken_for_text(c.f, 0.82f, 0.38f);
     float maxw = c.sw * (c.portrait ? 1.f : 0.7f);
@@ -1671,8 +1671,24 @@ void draw_story(Ctx& c, const Image& im) {
     bool zoom_in = v % 2 == 0;
     float k = zoom_in ? 1.04f + 0.13f * kb : 1.17f - 0.13f * kb;
     float dir = v == 1 ? -1.f : v == 3 ? 1.f : (c.index % 2 ? 0.5f : -0.5f);
+    float vdir = 0.f;
+    const std::string& cm = c.s.camera;
+    if (cm != "auto") {
+        zoom_in = cm != "out";
+        dir = cm == "left" ? 1.f : cm == "right" ? -1.f : 0.f;
+        vdir = cm == "up" ? 1.f : cm == "down" ? -1.f : 0.f;
+        if (cm == "in") k = 1.f + 0.15f * kb;
+        else if (cm == "out") k = 1.15f - 0.15f * kb;
+        else if (cm == "still") k = 1.f;
+        else k = 1.14f;
+    }
+    float zoom = static_cast<float>(c.s.zoom);
+    k *= zoom;
     float pan = dir * (kb - 0.5f);
+    float tilt = vdir * (kb - 0.5f);
     bool contain = c.portrait ? ia > 0.78f : ia < fa * 0.72f;
+    if (c.s.fit == "cover") contain = false;
+    else if (c.s.fit == "contain") contain = true;
     if (contain) {
         float bw = ia > fa ? c.H * ia : c.W, bh = ia > fa ? c.H : c.W / ia;
         bw *= 1.12f + 0.05f * kb;
@@ -1680,20 +1696,21 @@ void draw_story(Ctx& c, const Image& im) {
         draw_level(c.f, im.blur, (c.W - bw) * 0.5f, (c.H - bh) * 0.5f, bw, bh, 0.f, 1.f);
         dim(c.f, c.pal.light ? 0.62f : 0.5f);
         float fw, fh, cx, cy;
+        if (cm == "still") zoom_in = true, kb = 0.f;
         if (c.portrait) {
-            fw = c.W * (zoom_in ? 1.0f + 0.10f * kb : 1.10f - 0.10f * kb);
+            fw = c.W * (zoom_in ? 1.0f + 0.10f * kb : 1.10f - 0.10f * kb) * zoom;
             fh = fw / ia;
-            if (fh > c.H * 0.62f) {
-                fh = c.H * 0.62f;
+            if (fh > c.H * 0.62f * zoom) {
+                fh = c.H * 0.62f * zoom;
                 fw = fh * ia;
             }
             cx = c.W * 0.5f + pan * c.W * 0.06f;
-            cy = c.H * 0.42f;
+            cy = c.H * 0.42f + tilt * c.H * 0.04f;
         } else {
-            fh = c.H * (0.86f + 0.06f * (zoom_in ? kb : 1.f - kb));
+            fh = c.H * (0.86f + 0.06f * (zoom_in ? kb : 1.f - kb)) * zoom;
             fw = fh * ia;
             cx = c.W * 0.5f + pan * c.W * 0.03f;
-            cy = c.H * 0.5f;
+            cy = c.H * 0.5f + tilt * c.H * 0.03f;
         }
         float r = c.portrait ? 0.f : 16.f * c.S;
         shadow_rrect(c.f, cx - fw * 0.5f, cy - fh * 0.5f + 18.f * c.S, fw, fh, r, 50.f * c.S, 0.55f);
@@ -1703,8 +1720,12 @@ void draw_story(Ctx& c, const Image& im) {
         dw *= k;
         dh *= k;
         float spare_x = std::max(0.f, dw - c.W), spare_y = std::max(0.f, dh - c.H);
-        float x = (c.W - dw) * 0.5f + pan * spare_x * 0.8f;
-        float y = (c.H - dh) * 0.5f + (zoom_in ? -0.15f : 0.15f) * (kb - 0.5f) * spare_y;
+        // The focus point is the part of the photo the user wants kept in frame; the pan moves around it.
+        float fx = std::clamp(c.W * 0.5f - static_cast<float>(c.s.focus_x) * dw, c.W - dw, 0.f);
+        float fy = std::clamp(c.H * 0.5f - static_cast<float>(c.s.focus_y) * dh, c.H - dh, 0.f);
+        float drift_y = cm == "auto" ? (zoom_in ? -0.15f : 0.15f) * (kb - 0.5f) * spare_y : tilt * spare_y * 0.8f;
+        float x = std::clamp(fx + pan * spare_x * 0.8f, c.W - dw, 0.f);
+        float y = std::clamp(fy + drift_y, c.H - dh, 0.f);
         draw_image(c.f, im, x, y, dw, dh, 0.f, 1.f);
     }
     darken_for_text(c.f, c.portrait ? 0.62f : 0.55f, 0.f);
@@ -1782,7 +1803,238 @@ bool turkish_board(const Storyboard& b) {
     return false;
 }
 
-void render_scene(const Storyboard& b, int index, double local, double T, Frame& out) {
+Rgb rgb_hex(const std::string& hex, Rgb fallback) {
+    unsigned char c[3];
+    if (!parse_hex_color(hex, c)) return fallback;
+    return {c[0], c[1], c[2]};
+}
+
+// ---------------------------------------------------------------- manual edits
+
+void apply_look(Frame& f, const Look& lk) {
+    float br = static_cast<float>(lk.brightness) * 0.35f;
+    float ct = 1.f + static_cast<float>(lk.contrast) * (lk.contrast > 0 ? 0.8f : 0.6f);
+    float sat = 1.f + static_cast<float>(lk.saturation);
+    float warm = static_cast<float>(lk.warmth) * 0.09f;
+    float vig = static_cast<float>(lk.vignette);
+    float lift = 0.f, sepia = 0.f;
+    float tint[3] = {0, 0, 0};
+    const std::string& fl = lk.filter;
+    if (fl == "bw") sat = 0.f, ct *= 1.08f;
+    else if (fl == "sepia") sat = 0.f, sepia = 1.f;
+    else if (fl == "vintage") sat *= 0.7f, warm += 0.05f, ct *= 0.88f, lift = 0.06f, vig = std::max(vig, 0.45f), sepia = 0.25f;
+    else if (fl == "warm") warm += 0.06f, sat *= 1.08f;
+    else if (fl == "cool") warm -= 0.06f, tint[1] = 0.01f;
+    else if (fl == "vivid") sat *= 1.4f, ct *= 1.12f;
+    else if (fl == "noir") sat = 0.f, ct *= 1.45f, vig = std::max(vig, 0.6f), br -= 0.03f;
+    else if (fl == "fade") ct *= 0.8f, lift = 0.1f, sat *= 0.85f;
+    float lut[256];
+    for (int i = 0; i < 256; i++) {
+        float v = i / 255.f;
+        v = (v - 0.5f) * ct + 0.5f + br;
+        v = lift + v * (1.f - lift);
+        lut[i] = v;
+    }
+    const int w = f.w, h = f.h;
+    float cx = w * 0.5f, cy = h * 0.5f, inv = 1.f / std::sqrt(cx * cx + cy * cy);
+    for (int y = 0; y < h; y++) {
+        uint8_t* row = px_at(f, 0, y);
+        float dy = (y + 0.5f - cy);
+        for (int x = 0; x < w; x++) {
+            uint8_t* p = row + x * 4;
+            float r = lut[p[0]], g = lut[p[1]], b = lut[p[2]];
+            float l = r * 0.299f + g * 0.587f + b * 0.114f;
+            r = l + (r - l) * sat;
+            g = l + (g - l) * sat;
+            b = l + (b - l) * sat;
+            if (sepia > 0.f) {
+                float sr = l * 1.07f + 0.05f, sg = l * 0.95f + 0.02f, sb = l * 0.78f;
+                r += (sr - r) * sepia;
+                g += (sg - g) * sepia;
+                b += (sb - b) * sepia;
+            }
+            r += warm + tint[0];
+            g += tint[1] + warm * 0.2f;
+            b -= warm;
+            if (vig > 0.f) {
+                float dx = x + 0.5f - cx;
+                float d = std::sqrt(dx * dx + dy * dy) * inv;
+                float m = 1.f - vig * 0.85f * smoothstep(0.45f, 1.05f, d);
+                r *= m;
+                g *= m;
+                b *= m;
+            }
+            p[0] = static_cast<uint8_t>(std::clamp(r * 255.f + 0.5f, 0.f, 255.f));
+            p[1] = static_cast<uint8_t>(std::clamp(g * 255.f + 0.5f, 0.f, 255.f));
+            p[2] = static_cast<uint8_t>(std::clamp(b * 255.f + 0.5f, 0.f, 255.f));
+        }
+    }
+}
+
+// Rotated rounded rectangle, filled with a colour or sampled from an image level.
+void draw_rotated(Frame& f, float cx, float cy, float w, float h, float deg, float radius, float alpha, Rgb c,
+                  const Level* L) {
+    if (w < 1.f || h < 1.f || alpha <= 0.002f) return;
+    if (L && L->px.empty()) return;
+    float a = deg * kPi / 180.f, cs = std::cos(a), sn = std::sin(a);
+    float hw = w * 0.5f, hh = h * 0.5f;
+    float ex = std::fabs(hw * cs) + std::fabs(hh * sn), ey = std::fabs(hw * sn) + std::fabs(hh * cs);
+    float r = std::min(radius, std::min(hw, hh));
+    Box b = clip_box(f, cx - ex, cy - ey, ex * 2.f, ey * 2.f);
+    float sx = L ? L->w / w : 0.f, sy = L ? L->h / h : 0.f;
+    for (int yy = b.y0; yy < b.y1; yy++) {
+        uint8_t* row = px_at(f, 0, yy);
+        float dy = yy + 0.5f - cy;
+        for (int xx = b.x0; xx < b.x1; xx++) {
+            float dx = xx + 0.5f - cx;
+            float u = dx * cs + dy * sn, v = -dx * sn + dy * cs;
+            float cov = clamp01(0.5f - rr_sdf(u, v, 0.f, 0.f, hw, hh, r));
+            if (cov <= 0.f) continue;
+            if (!L) {
+                blend_px(row + xx * 4, c, static_cast<int>(cov * alpha * 255.f));
+                continue;
+            }
+            float px = (u + hw) * sx - 0.5f, py = (v + hh) * sy - 0.5f;
+            int ix = static_cast<int>(std::floor(px)), iy = static_cast<int>(std::floor(py));
+            float fx = px - ix, fy = py - iy;
+            int ix0 = std::clamp(ix, 0, L->w - 1) * 4, ix1 = std::clamp(ix + 1, 0, L->w - 1) * 4;
+            const uint8_t* r0 = &L->px[static_cast<size_t>(std::clamp(iy, 0, L->h - 1)) * L->w * 4];
+            const uint8_t* r1 = &L->px[static_cast<size_t>(std::clamp(iy + 1, 0, L->h - 1)) * L->w * 4];
+            float s[4];
+            for (int k = 0; k < 4; k++) {
+                float top = r0[ix0 + k] + (r0[ix1 + k] - r0[ix0 + k]) * fx;
+                float bot = r1[ix0 + k] + (r1[ix1 + k] - r1[ix0 + k]) * fx;
+                s[k] = top + (bot - top) * fy;
+            }
+            blend_px(row + xx * 4, Rgb{static_cast<uint8_t>(s[0]), static_cast<uint8_t>(s[1]), static_cast<uint8_t>(s[2])},
+                     static_cast<int>(cov * alpha * s[3]));
+        }
+    }
+}
+
+const Level& level_for(const Image& im, float w, float h) {
+    size_t li = 0;
+    while (li + 1 < im.levels.size() && im.levels[li + 1].w >= w && im.levels[li + 1].h >= h) li++;
+    return im.levels[li];
+}
+
+struct LayerAnim {
+    float a = 1.f, dx = 0.f, dy = 0.f, k = 1.f, typed = -1.f;
+};
+
+LayerAnim layer_anim(const Layer& l, double local, double scene_sec, float W, float H) {
+    LayerAnim an;
+    double end = l.end > l.start ? std::min(l.end, scene_sec) : scene_sec;
+    if (local < l.start || local > end + 1e-6) {
+        an.a = 0.f;
+        return an;
+    }
+    float tin = static_cast<float>(local - l.start), tout = static_cast<float>(end - local);
+    float p = clamp01(tin / 0.45f);
+    if (l.in == "fade") an.a = ease_out(p);
+    else if (l.in == "rise") {
+        an.a = clamp01(p * 1.6f);
+        an.dy = (1.f - ease_out(p)) * H * 0.05f;
+    } else if (l.in == "pop") {
+        float q = clamp01(tin / 0.6f);
+        an.a = clamp01(q * 4.f);
+        an.k = 0.55f + 0.45f * spring(q);
+    } else if (l.in == "slide") {
+        an.a = clamp01(p * 2.f);
+        an.dx = -(1.f - ease_expo(p)) * W * 0.12f;
+    } else if (l.in == "type") {
+        an.typed = tin;
+    }
+    // A layer that runs to the end of its scene leaves with the scene transition instead of fading early.
+    if (l.out == "fade" && end < scene_sec - 0.05) an.a *= clamp01(tout / 0.35f);
+    an.a *= static_cast<float>(l.opacity);
+    return an;
+}
+
+struct LayerGeom {
+    float cx = 0, cy = 0, w = 0, h = 0;
+    Block blk;
+    float text_x = 0, text_left = 0;
+};
+
+LayerGeom layer_geom(const Layer& l, float W, float H, float k) {
+    LayerGeom g;
+    float S = std::min(W, H) / 720.f;
+    g.cx = static_cast<float>(l.x) * W;
+    g.cy = static_cast<float>(l.y) * H;
+    g.w = static_cast<float>(l.w) * W * k;
+    if (l.kind == "text") {
+        float px = 48.f * S * static_cast<float>(l.size) * k;
+        g.blk = make_block(l.text.empty() ? std::string(" ") : l.text, l.bold, px, g.w, 40, px, l.bold ? 1.12f : 1.3f);
+        g.h = static_cast<float>(std::max(g.blk.height, static_cast<int>(px)));
+        float left = g.cx - g.w * 0.5f;
+        g.text_x = l.align == 0 ? left : l.align == 2 ? left + g.w : g.cx;
+        g.text_left = l.align == 0 ? left : l.align == 2 ? left + g.w - g.blk.width : g.cx - g.blk.width * 0.5f;
+    } else if (l.kind == "image") {
+        auto im = get_image(l.image);
+        float ia = im && im->h() > 0 ? static_cast<float>(im->w()) / static_cast<float>(im->h()) : 1.f;
+        g.h = g.w / ia;
+    } else {
+        g.h = static_cast<float>(l.h) * H * k;
+    }
+    return g;
+}
+
+void draw_layer(Frame& f, const Layer& l, double local, double scene_sec, Rgb accent) {
+    float W = static_cast<float>(f.w), H = static_cast<float>(f.h);
+    float S = std::min(W, H) / 720.f;
+    LayerAnim an = layer_anim(l, local, scene_sec, W, H);
+    if (an.a <= 0.003f) return;
+    LayerGeom g = layer_geom(l, W, H, an.k);
+    g.cx += an.dx;
+    g.cy += an.dy;
+    Rgb ink = rgb_hex(l.color, kWhite);
+    float radius = static_cast<float>(l.radius) * S;
+    if (l.kind == "text") {
+        if (g.blk.lines.empty()) return;
+        float top = g.cy - g.blk.height * 0.5f;
+        float left = g.text_left + an.dx;
+        if (!l.fill.empty()) {
+            float pad = g.blk.px * 0.32f;
+            fill_rrect(f, left - pad, top - pad * 0.55f, g.blk.width + pad * 2.f, g.blk.height + pad * 1.1f, radius,
+                       rgb_hex(l.fill, kBlack), an.a);
+        }
+        Motion m;
+        m.kind = an.typed >= 0.f ? kType : kNone;
+        m.cps = 26.f;
+        draw_block(f, g.blk, an.typed >= 0.f ? an.typed : 0.f, g.text_x + an.dx, top, l.align, ink, accent, an.a, m,
+                   l.shadow ? 0.6f : 0.f, S);
+        return;
+    }
+    float deg = static_cast<float>(l.rotation);
+    if (l.shadow && std::fabs(deg) < 0.01f)
+        shadow_rrect(f, g.cx - g.w * 0.5f, g.cy - g.h * 0.5f + 12.f * S, g.w, g.h, radius, 34.f * S, 0.5f * an.a);
+    if (l.kind == "image") {
+        auto im = get_image(l.image);
+        if (!im || im->levels.empty()) return;
+        draw_rotated(f, g.cx, g.cy, g.w, g.h, deg, radius, an.a, kWhite, &level_for(*im, g.w, g.h));
+    } else {
+        draw_rotated(f, g.cx, g.cy, g.w, g.h, deg, radius, an.a, rgb_hex(l.fill, ink), nullptr);
+    }
+}
+
+// A hand-picked camera move replaces the scene's motion preset.
+Cam camera_override(const std::string& camera, float u, float W, float H) {
+    Cam c;
+    float e = ease_in_out(std::clamp(u, 0.f, 1.2f));
+    if (camera == "in") c.k = 1.f + 0.12f * e;
+    else if (camera == "out") c.k = 1.12f - 0.12f * e;
+    else if (camera == "left" || camera == "right") {
+        c.k = 1.08f;
+        c.ox = (e - 0.5f) * W * 0.07f * (camera == "left" ? 1.f : -1.f);
+    } else if (camera == "up" || camera == "down") {
+        c.k = 1.08f;
+        c.oy = (e - 0.5f) * H * 0.07f * (camera == "up" ? 1.f : -1.f);
+    }
+    return c;
+}
+
+void paint_scene(const Storyboard& b, int index, double local, double T, Frame& out) {
     const int W = b.width, H = b.height;
     out.w = W;
     out.h = H;
@@ -1791,7 +2043,8 @@ void render_scene(const Storyboard& b, int index, double local, double T, Frame&
     Pal pal = palette_for(style_of(b, index));
     float dur = static_cast<float>(std::max(0.001, s.seconds));
     float u = static_cast<float>(local) / dur;
-    Cam cam = camera_for(s.motion, std::clamp(u, 0.f, 1.2f), static_cast<float>(W), static_cast<float>(H));
+    Cam cam = s.camera != "auto" ? camera_override(s.camera, u, static_cast<float>(W), static_cast<float>(H))
+                                 : camera_for(s.motion, std::clamp(u, 0.f, 1.2f), static_cast<float>(W), static_cast<float>(H));
     paint_background(out, pal, static_cast<float>(T), cam);
     float S = static_cast<float>(std::min(W, H)) / 720.f;
     paint_deco(out, pal, static_cast<float>(T), cam, S);
@@ -1848,6 +2101,16 @@ void render_scene(const Storyboard& b, int index, double local, double T, Frame&
     else if (layout == "bars") draw_bars(c);
     else if (layout == "end") draw_end(c);
     else draw_statement(c);
+}
+
+void render_scene(const Storyboard& b, int index, double local, double T, Frame& out) {
+    paint_scene(b, index, local, T, out);
+    const Scene& s = b.scenes[static_cast<size_t>(index)];
+    if (s.look.active()) apply_look(out, s.look);
+    if (!s.layers.empty()) {
+        Pal pal = palette_for(style_of(b, index));
+        for (const auto& l : s.layers) draw_layer(out, l, local, s.seconds, pal.accent);
+    }
 }
 
 void sample_scaled(const Frame& src, float k, float sx, float sy, float& r, float& g, float& b) {
@@ -2132,15 +2395,16 @@ void draw_captions(const Storyboard& b, int index, double local, Frame& f) {
     for (int i = a; i < e; i++) {
         if (i > a) text += ' ';
         const std::string& w = words[static_cast<size_t>(i)].s;
-        text += wm ? (turkish ? upper_tr(w) : upper_ascii(w)) : w;
+        text += wm && b.caption_upper ? (turkish ? upper_tr(w) : upper_ascii(w)) : w;
     }
-    float px = wm ? (portrait ? 62.f : 52.f) * S : (portrait ? 34.f : 30.f) * S;
+    float px = (wm ? (portrait ? 62.f : 52.f) * S : (portrait ? 34.f : 30.f) * S) * static_cast<float>(b.caption_size);
     Block blk = make_block(text, true, px, W * (wm ? 0.86f : 0.8f), 2, px * 0.6f, 1.12f);
     if (blk.lines.empty()) return;
     float top = wm ? H * (portrait ? 0.70f : 0.72f) - blk.height * 0.5f : H * (portrait ? 0.84f : 0.9f) - blk.height;
+    if (b.caption_y > 0) top = H * static_cast<float>(b.caption_y) - blk.height * 0.5f;
     float alpha = static_cast<float>(clamp01(static_cast<float>((lt - words[static_cast<size_t>(a)].start + 0.04) / 0.1)));
     float r = std::max(2.f, blk.px * (wm ? 0.085f : 0.065f));
-    const Rgb yellow{255, 216, 77};
+    const Rgb yellow = rgb_hex(b.caption_color, Rgb{255, 216, 77});
     int k = 0;
     for (size_t li = 0; li < blk.lines.size(); li++) {
         const LineT& L = blk.lines[li];
@@ -2257,6 +2521,27 @@ bool image_readable(const std::string& path, int* w, int* h) {
     if (w) *w = im->w();
     if (h) *h = im->h();
     return true;
+}
+
+bool layer_box(const Storyboard& b, int scene, int layer, float& cx, float& cy, float& w, float& h) {
+    if (scene < 0 || scene >= static_cast<int>(b.scenes.size())) return false;
+    const Scene& s = b.scenes[static_cast<size_t>(scene)];
+    if (layer < 0 || layer >= static_cast<int>(s.layers.size())) return false;
+    LayerGeom g = layer_geom(s.layers[static_cast<size_t>(layer)], static_cast<float>(b.width), static_cast<float>(b.height), 1.f);
+    cx = g.cx;
+    cy = g.cy;
+    w = g.w;
+    h = g.h;
+    return true;
+}
+
+bool layer_visible(const Storyboard& b, int scene, int layer, double local) {
+    if (scene < 0 || scene >= static_cast<int>(b.scenes.size())) return false;
+    const Scene& s = b.scenes[static_cast<size_t>(scene)];
+    if (layer < 0 || layer >= static_cast<int>(s.layers.size())) return false;
+    const Layer& l = s.layers[static_cast<size_t>(layer)];
+    double end = l.end > l.start ? std::min(l.end, s.seconds) : s.seconds;
+    return local >= l.start && local <= end;
 }
 
 void render_frame(const Storyboard& board, double time_sec, Frame& out) {

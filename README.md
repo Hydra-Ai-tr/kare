@@ -30,6 +30,27 @@ Kare bir video difüzyon modeli değildir ve dev bir model dosyası indirmez. Ü
 
 Oluştur sayfasında **Shorts**, **İnternetten araştır** ve **Seslendirme** seçenekleri var. `anlatan`, `hakkında`, `tarihi`, `nedir`, `kimdir` gibi kelimeler araştırmayı kendiliğinden açar. Sahne ayarlarında her sahnenin anlatım metni düzenlenebilir; ses, konuşma hızı ve alt yazı biçimi video ayarlarındadır. Yüklü sesleri `kare-cli voices` listeler; yeni ses için Windows **Ayarlar → Zaman ve dil → Konuşma**.
 
+## Elle düzenleme
+
+Otomatik kurgu yalnızca bir başlangıç noktası. Düzenle sayfasında her şeyi elle değiştirebilirsiniz:
+
+- **Katmanlar:** Her sahneye en fazla 16 yazı, görsel (PNG/JPG, logo) ve kutu ekleyebilirsiniz. Katmanları önizlemede sürükleyerek taşıyın, köşesinden büyütün (karşı köşe sabit kalır, Alt ile merkezden), yanlarından genişletin, üstteki tutamaçla döndürün (Shift 15° adımlarla). Merkeze yaklaşınca pembe kılavuzlar belirir ve yapıştırır; Alt bu yapışmayı kapatır, Shift tek eksende tutar.
+- **Katman ayarları:** metin ve `*vurgu*`, yazı boyutu, hizalama, kalınlık, renk, arka plan kutusu, saydamlık, köşe yuvarlaklığı, açı, gölge, konum ve boyut. Giriş animasyonları: belirme, yükselme, pop, kayma, daktilo; çıkış: kaybolma. Başlangıç ve bitiş zamanı ayarlanır. "Tüm sahnelere ekle" ile logo veya filigran tek tıkla her sahneye kopyalanır.
+- **Zaman çizelgesi:** Katmanlar şeridindeki çubukları sürükleyerek kaydırın, kenarlarından kırpın. Sahne kliplerini sürükleyip bırakarak sıralarını değiştirin.
+- **Renk:** 9 filtre (siyah-beyaz, sepya, vintage, sıcak, soğuk, canlı, noir, soluk); parlaklık, kontrast, doygunluk, sıcaklık ve vinyet ayarları. Renk ayarı yalnızca sahne görüntüsüne uygulanır, eklediğiniz katmanlar etkilenmez.
+- **Kamera:** yakınlaş, uzaklaş, sola, sağa, yukarı, aşağı kaydır ya da sabit kamera. Yakınlaştırma oranı, görsel yerleşimi (doldur/sığdır) ve odak noktası ayarlanabilir; odak noktası önizlemede tıklanarak seçilir.
+- **Ses:** Kendi müziğinizi yükleyin (MP3, WAV, M4A, WMA, AAC). Parça kısaysa döngüye girer, seslendirme sırasında otomatik kısılır. Müzik ve ses seviyeleri ayrı ayarlanır. Alt yazının boyutu, dikey konumu, vurgu rengi ve büyük harf seçeneği de buradadır.
+
+| Kısayol | İşlev |
+| --- | --- |
+| Önizlemede çift tık | O noktaya yazı ekler; yazıya çift tık metni düzenler |
+| `T` | Yazı katmanı ekler |
+| Ok tuşları (Shift ile ×10) | Seçili katmanı kaydırır |
+| `Ctrl+C` / `Ctrl+V` / `Ctrl+D` | Katmanı kopyalar / yapıştırır / çoğaltır |
+| `Del` | Seçili katmanı siler |
+| `Esc` | Seçimi kaldırır |
+| `Ctrl+Z` / `Ctrl+Y` | Geri al / yinele |
+
 ## Ne yapar
 
 - Türkçe ve İngilizce promptu çevrimdışı kurgular: `8 saniye`, `dikey`, `başlık: "Boğaz"`, madde listesi, `Kapadokya: balonlar, peri bacaları ve sabah` gibi virgüllü cümleler.
@@ -48,7 +69,7 @@ Oluştur sayfasında **Shorts**, **İnternetten araştır** ve **Seslendirme** s
 
 ## Kurulum
 
-[Sürümler](https://github.com/Hydra-Ai-tr/kare/releases/latest) sayfasından `kare-0.3.0-windows-x64.zip` dosyasını indirip açın. `kare.exe` masaüstü uygulamasıdır, `kare-cli.exe` komut satırıdır. Windows 10 veya daha yenisi gerekir.
+[Sürümler](https://github.com/Hydra-Ai-tr/kare/releases/latest) sayfasından `kare-0.4.0-windows-x64.zip` dosyasını indirip açın. `kare.exe` masaüstü uygulamasıdır, `kare-cli.exe` komut satırıdır. Windows 10 veya daha yenisi gerekir.
 
 İmza henüz yok. SmartScreen uyarırsa **Diğer bilgiler → Yine de çalıştır**.
 
@@ -149,6 +170,27 @@ Type `Make a short about the Titanic disaster`. Kare:
 
 The Create page has **Shorts**, **Research online**, and **Narration** options. Words such as `about`, `explain`, `history of`, and `who was` turn research on by themselves. Each scene's narration is editable in scene settings; voice, speed, and caption style are in the video settings. `kare-cli voices` lists installed voices; add more in Windows **Settings → Time & language → Speech**.
 
+## Edit by hand
+
+The generated cut is only a starting point. Everything can be changed by hand on the Edit page:
+
+- **Layers:** up to 16 text, image (PNG/JPG, logos), and box layers per scene. Drag them on the preview to move, pull a corner to scale (the opposite corner stays put; Alt scales from the centre), pull a side to change the width, and use the top knob to rotate (Shift snaps to 15°). Pink guides snap to the centre; Alt turns snapping off and Shift locks the axis.
+- **Layer settings:** text with `*highlight*`, size, alignment, bold, colour, backdrop, opacity, corner radius, angle, shadow, position, and size. Entrances: fade, rise, pop, slide, typewriter; exit: fade. Start and end times. "Add to all scenes" copies a logo or watermark to every scene.
+- **Timeline:** drag layer bars in the Layers lane to move them and drag their edges to trim. Drag scene clips to reorder them.
+- **Colour:** 9 filters (black and white, sepia, vintage, warm, cool, vivid, noir, faded) plus brightness, contrast, saturation, warmth, and vignette. Grading only touches the scene picture, never your layers.
+- **Camera:** push in, pull out, pan left, right, up, or down, or hold still. Zoom, fit (fill or contain), and a focus point you can click on the preview.
+- **Sound:** load your own music (MP3, WAV, M4A, WMA, AAC). Short tracks loop and duck under the narration. Separate music and voice volumes. Caption size, vertical position, highlight colour, and uppercase are here too.
+
+| Shortcut | Action |
+| --- | --- |
+| Double-click the preview | Adds text there; double-click text to edit it |
+| `T` | Adds a text layer |
+| Arrow keys (Shift ×10) | Nudges the selected layer |
+| `Ctrl+C` / `Ctrl+V` / `Ctrl+D` | Copies / pastes / duplicates a layer |
+| `Del` | Deletes the selected layer |
+| `Esc` | Clears the selection |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
+
 ## What it does
 
 - Plans Turkish and English prompts offline (`8 seconds`, `9:16`, `title: "Hello"`, numbered lists, comma-separated clauses).
@@ -167,7 +209,7 @@ The Create page has **Shorts**, **Research online**, and **Narration** options. 
 
 ## Install
 
-Download `kare-0.3.0-windows-x64.zip` from [Releases](https://github.com/Hydra-Ai-tr/kare/releases/latest) and unzip it. `kare.exe` is the app, `kare-cli.exe` is the command line. Windows 10 or newer.
+Download `kare-0.4.0-windows-x64.zip` from [Releases](https://github.com/Hydra-Ai-tr/kare/releases/latest) and unzip it. `kare.exe` is the app, `kare-cli.exe` is the command line. Windows 10 or newer.
 
 The build is not signed yet. If SmartScreen appears, choose **More info → Run anyway**.
 

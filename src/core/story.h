@@ -9,6 +9,39 @@ constexpr int kMaxScenes = 24;
 constexpr double kMaxSceneSeconds = 30.0;
 constexpr double kMaxTotalSeconds = 180.0;
 
+constexpr int kMaxLayers = 16;
+
+// A free element the user places by hand on top of a scene. Positions are fractions of the frame so a layer
+// keeps its place when the aspect or resolution changes.
+struct Layer {
+    std::string kind = "text";  // text, image, box
+    std::string text;
+    std::string image;
+    double x = 0.5, y = 0.5;  // centre
+    double w = 0.5;           // width (text wraps inside it)
+    double h = 0.12;          // box height
+    double size = 1.0;        // text size multiplier
+    double rotation = 0.0;    // degrees, boxes and images only
+    std::string color = "#ffffff";
+    std::string fill;  // text backdrop or box colour, empty for none
+    double opacity = 1.0;
+    double radius = 0.0;
+    double start = 0.0, end = 0.0;  // seconds inside the scene; end <= start runs to the scene end
+    std::string in = "fade";        // none fade rise pop slide type
+    std::string out = "fade";       // none fade
+    bool bold = true;
+    bool shadow = true;
+    int align = 1;  // 0 left, 1 centre, 2 right
+};
+
+struct Look {
+    std::string filter = "none";
+    double brightness = 0, contrast = 0, saturation = 0, warmth = 0, vignette = 0;
+    bool active() const {
+        return filter != "none" || brightness != 0 || contrast != 0 || saturation != 0 || warmth != 0 || vignette != 0;
+    }
+};
+
 struct Scene {
     std::string title;
     std::string text;
@@ -21,6 +54,12 @@ struct Scene {
     std::string kicker;
     std::string image;
     std::string narration;
+    std::string camera = "auto";  // auto in out left right up down still
+    std::string fit = "auto";     // auto cover contain
+    double focus_x = 0.5, focus_y = 0.5;
+    double zoom = 1.0;
+    Look look;
+    std::vector<Layer> layers;
 };
 
 struct Storyboard {
@@ -38,8 +77,24 @@ struct Storyboard {
     int voice_rate = 0;
     std::string captions = "auto";
     std::string credits;
+    std::string music_file;
+    double music_volume = 1.0;
+    double voice_volume = 1.0;
+    double caption_y = 0.0;  // 0 = automatic placement, otherwise the caption centre as a fraction of height
+    double caption_size = 1.0;
+    std::string caption_color = "#ffd84d";
+    bool caption_upper = true;
     std::vector<Scene> scenes;
 };
+
+const std::vector<std::string>& layer_kind_ids();
+const std::vector<std::string>& layer_in_ids();
+const std::vector<std::string>& camera_ids();
+const std::vector<std::string>& fit_ids();
+const std::vector<std::string>& filter_ids();
+bool parse_hex_color(const std::string& hex, unsigned char rgb[3]);
+std::string hex_color(const unsigned char rgb[3]);
+void normalize_layer(Layer& layer);
 
 bool has_narration(const Storyboard& board);
 const std::vector<std::string>& caption_ids();

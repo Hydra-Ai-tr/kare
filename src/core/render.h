@@ -23,4 +23,8 @@ std::string resolve_anim(const Storyboard& board, int index);
 double transition_seconds(const Storyboard& board, int index);
 bool image_readable(const std::string& path, int* w = nullptr, int* h = nullptr);
 
+// Final (un-animated) placement of a layer in board pixels; text layers report their wrap width and text height.
+bool layer_box(const Storyboard& board, int scene, int layer, float& cx, float& cy, float& w, float& h);
+bool layer_visible(const Storyboard& board, int scene, int layer, double local);
+
 }  // namespace kare

@@ -8,6 +8,8 @@ namespace kare {
 struct ShotInput {
     float x = 0, y = 0;
     int button = -1;
+    bool drag = false;
+    float x2 = 0, y2 = 0;
 };
 
 struct Launch {

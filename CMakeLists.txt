@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Kare VERSION 0.3.0 LANGUAGES CXX)
+project(Kare VERSION 0.4.0 LANGUAGES CXX)
 
 option(KARE_BUILD_GUI "Build the Kare desktop application" ON)
 
@@ -30,6 +30,7 @@ add_library(karecore STATIC
   src/core/font.cpp
   src/core/render.cpp
   src/core/audio.cpp
+  src/core/media.cpp
   src/core/tts.cpp
   src/core/web.cpp
   src/core/encode.cpp)

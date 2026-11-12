@@ -23,7 +23,7 @@ namespace {
 kare::ShotInput parse_point(const std::string& s, int button) {
     kare::ShotInput in;
     in.button = button;
-    std::sscanf(s.c_str(), "%f,%f", &in.x, &in.y);
+    in.drag = std::sscanf(s.c_str(), "%f,%f:%f,%f", &in.x, &in.y, &in.x2, &in.y2) == 4;
     return in;
 }
 
@@ -58,6 +58,8 @@ int main() {
         } else if (a == "--hover" && has_next) {
             launch.inputs.push_back(parse_point(args[++i], -1));
         } else if (a == "--click" && has_next) {
+            launch.inputs.push_back(parse_point(args[++i], 0));
+        } else if (a == "--drag" && has_next) {
             launch.inputs.push_back(parse_point(args[++i], 0));
         } else if (a == "--rclick" && has_next) {
             launch.inputs.push_back(parse_point(args[++i], 1));

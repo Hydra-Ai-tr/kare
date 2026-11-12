@@ -28,6 +28,7 @@
 #include "core/encode.h"
 #include "core/font.h"
 #include "core/github.h"
+#include "core/media.h"
 #include "core/render.h"
 #include "core/story.h"
 #include "core/tts.h"
@@ -124,7 +125,7 @@ constexpr uint32_t house = 0xe0f8, sparkles = 0xe417, film = 0xe0d4, clapper = 0
                    volume = 0xe1ab, mute = 0xe1ac, image = 0xe0f9, image_plus = 0xe1f7, image_off = 0xe1c0,
                    layout = 0xe207, blend = 0xe5a1, cursor = 0xe264, paste = 0xe3ec, clipboard = 0xe089,
                    eraser = 0xe28f, restart = 0xe14c, list_x = 0xe240, insert = 0xe597, wave = 0xe560,
-                   file_audio = 0xe30e, link = 0xe108, move = 0xe1c6, square_plus = 0xe177;
+                   file_audio = 0xe30e, link = 0xe108, move = 0xe1c6, square_plus = 0xe177, up = 0xe074;
 }  // namespace ic
 
 const char* I(uint32_t cp) {
@@ -174,6 +175,19 @@ const Opt kMusicOpts[] = {{"auto", "Otomatik", "Auto"}, {"ambient", "Ambiyans", 
                           {"drive", "Hız", "Drive"},    {"lofi", "Lo-fi", "Lo-fi"},         {"none", "Sessiz", "Silent"}};
 const Opt kMotionOpts[] = {{"drift", "Kaydır", "Drift"}, {"zoom", "Yakınlaş", "Zoom"}, {"rise", "Yüksel", "Rise"},
                            {"pan", "Pan", "Pan"},        {"still", "Sabit", "Still"}};
+const Opt kLayerInOpts[] = {{"none", "Yok", "None"},   {"fade", "Belirme", "Fade"}, {"rise", "Yükselme", "Rise"},
+                            {"pop", "Patlama", "Pop"}, {"slide", "Kayma", "Slide"}, {"type", "Daktilo", "Typewriter"}};
+const Opt kLayerOutOpts[] = {{"fade", "Sönme", "Fade"}, {"none", "Yok", "None"}};
+const Opt kCameraOpts[] = {{"auto", "Otomatik", "Auto"},    {"in", "Yakınlaş", "Zoom in"},  {"out", "Uzaklaş", "Zoom out"},
+                           {"left", "Sola kay", "Pan left"}, {"right", "Sağa kay", "Pan right"}, {"up", "Yukarı", "Tilt up"},
+                           {"down", "Aşağı", "Tilt down"},   {"still", "Sabit", "Still"}};
+const Opt kFitOpts[] = {{"auto", "Otomatik", "Auto"}, {"cover", "Doldur", "Fill"}, {"contain", "Sığdır", "Fit"}};
+const Opt kFilterOpts[] = {{"none", "Yok", "None"},          {"bw", "Siyah-beyaz", "B&W"}, {"sepia", "Sepya", "Sepia"},
+                           {"vintage", "Vintage", "Vintage"}, {"warm", "Sıcak", "Warm"},    {"cool", "Soğuk", "Cool"},
+                           {"vivid", "Canlı", "Vivid"},       {"noir", "Noir", "Noir"},     {"fade", "Soluk", "Faded"}};
+
+enum EditTab { kTabScene, kTabLayers, kTabColor, kTabSound };
+enum DragMode { kDragNone, kDragMove, kDragScale, kDragWidth, kDragRotate };
 
 template <size_t N>
 int opt_index(const Opt (&opts)[N], const std::string& id) {
@@ -294,6 +308,28 @@ struct App {
     std::string gpu_name;
     std::vector<Recent> recent;
     bool recent_dirty = true;
+
+    int edit_tab = kTabScene;
+    int sel_layer = -1;  // index into the selected scene's layers
+    int layer_scene = -1;
+    int drag_mode = kDragNone;
+    ImVec2 drag_from;
+    Layer drag_start;
+    float drag_hw = 0.f, drag_hh = 0.f;
+    bool drag_moved = false;
+    bool click_play = false;
+    bool interacting = false;  // preview renders at low resolution while something is dragged
+    bool pick_focus = false;
+    bool focus_layer_text = false;
+    bool snap_x = false, snap_y = false;
+    Layer clip_layer;
+    bool has_clip_layer = false;
+    float menu_fx = 0.5f, menu_fy = 0.5f;
+    int tl_drag_scene = -1;
+    bool tl_reordering = false;
+    int tl_layer_drag = -1;  // timeline drag on a layer bar: 1 body, 2 start edge, 3 end edge
+    int tl_layer_scene = -1, tl_layer_index = -1;
+    double tl_drag_t0 = 0, tl_drag_start = 0, tl_drag_end = 0;
 };
 
 // ---------------------------------------------------------------- system meters
@@ -994,6 +1030,8 @@ void set_board(App& app, Storyboard board) {
     app.play_t = app.board.scenes.empty() ? 0.0 : std::min(1.0, app.board.scenes[0].seconds * 0.4);
     app.playing = false;
     app.editing_title = false;
+    app.sel_layer = -1;
+    app.pick_focus = false;
     app.serial++;
     app.changed_at = 0;
     app.undo.clear();
@@ -1164,7 +1202,7 @@ void refresh_preview(App& app) {
         app.selected = scene_at(app.board, t);
     }
     int frame_i = static_cast<int>(app.play_t * static_cast<float>(app.board.fps));
-    bool low = app.playing && std::max(app.board.width, app.board.height) > 1000;
+    bool low = (app.playing || app.interacting) && std::max(app.board.width, app.board.height) > 1000;
     if (frame_i == app.shown_frame && app.serial == app.shown_serial && low == app.shown_low) return;
     std::string ferr;
     if (!fonts_load(ferr)) return;
@@ -1318,6 +1356,150 @@ void pick_image(App& app, int i) {
 #endif
 }
 
+// ---------------------------------------------------------------- hand-placed layers
+
+Scene* edit_scene(App& app) {
+    if (!app.has_board || app.selected < 0 || app.selected >= static_cast<int>(app.board.scenes.size())) return nullptr;
+    return &app.board.scenes[static_cast<size_t>(app.selected)];
+}
+
+Layer* edit_layer(App& app) {
+    Scene* s = edit_scene(app);
+    if (!s || app.layer_scene != app.selected || app.sel_layer < 0 || app.sel_layer >= static_cast<int>(s->layers.size())) return nullptr;
+    return &s->layers[static_cast<size_t>(app.sel_layer)];
+}
+
+void select_layer(App& app, int k) {
+    app.layer_scene = app.selected;
+    app.sel_layer = k;
+    if (k >= 0) {
+        app.page = kEdit;
+        app.edit_tab = kTabLayers;
+    }
+}
+
+std::string pick_image_path(App& app) {
+#ifdef _WIN32
+    std::string path = open_dialog(app.window, L"Images (PNG, JPG, BMP)\0*.png;*.jpg;*.jpeg;*.bmp\0\0");
+    if (path.empty()) return {};
+    if (!image_readable(path)) {
+        app.status = tr(app.cfg, "Bu görsel okunamadı (PNG, JPG ya da BMP seçin).", "Could not read this image (use PNG, JPG or BMP).");
+        return {};
+    }
+    return path;
+#else
+    (void)app;
+    return {};
+#endif
+}
+
+bool layer_add(App& app, const std::string& kind, float x = 0.5f, float y = 0.5f) {
+    Scene* s = edit_scene(app);
+    if (!s) return false;
+    if (static_cast<int>(s->layers.size()) >= kMaxLayers) {
+        app.status = tr(app.cfg, "Bir sahnede en fazla 16 katman olabilir.", "A scene can hold up to 16 layers.");
+        return false;
+    }
+    Layer l;
+    l.kind = kind;
+    l.x = x;
+    l.y = y;
+    bool portrait = app.board.height > app.board.width * 1.2;
+    if (kind == "text") {
+        l.text = tr(app.cfg, "Yeni yazı", "New text");
+        l.w = portrait ? 0.8 : 0.5;
+    } else if (kind == "image") {
+        l.image = pick_image_path(app);
+        if (l.image.empty()) return false;
+        l.w = portrait ? 0.6 : 0.32;
+        l.radius = 14;
+        l.in = "pop";
+    } else {
+        l.w = portrait ? 0.8 : 0.4;
+        l.h = 0.1;
+        l.color = "#28e2e8";
+        l.fill = "#28e2e8";
+        l.opacity = 0.9;
+        l.radius = 16;
+        l.in = "slide";
+        l.shadow = false;
+    }
+    normalize_layer(l);
+    s->layers.push_back(l);
+    select_layer(app, static_cast<int>(s->layers.size()) - 1);
+    app.playing = false;
+    touch(app);
+    return true;
+}
+
+void layer_delete(App& app, int k) {
+    Scene* s = edit_scene(app);
+    if (!s || k < 0 || k >= static_cast<int>(s->layers.size())) return;
+    s->layers.erase(s->layers.begin() + k);
+    app.sel_layer = s->layers.empty() ? -1 : std::min(k, static_cast<int>(s->layers.size()) - 1);
+    touch(app);
+}
+
+void layer_duplicate(App& app, int k) {
+    Scene* s = edit_scene(app);
+    if (!s || k < 0 || k >= static_cast<int>(s->layers.size()) || static_cast<int>(s->layers.size()) >= kMaxLayers) return;
+    Layer l = s->layers[static_cast<size_t>(k)];
+    l.x = std::min(1.5, l.x + 0.03);
+    l.y = std::min(1.5, l.y + 0.03);
+    s->layers.insert(s->layers.begin() + k + 1, l);
+    select_layer(app, k + 1);
+    touch(app);
+}
+
+void layer_order(App& app, int k, int to) {
+    Scene* s = edit_scene(app);
+    if (!s) return;
+    int n = static_cast<int>(s->layers.size());
+    to = std::clamp(to, 0, n - 1);
+    if (k < 0 || k >= n || k == to) return;
+    Layer l = s->layers[static_cast<size_t>(k)];
+    s->layers.erase(s->layers.begin() + k);
+    s->layers.insert(s->layers.begin() + to, l);
+    select_layer(app, to);
+    touch(app);
+}
+
+void layer_copy(App& app) {
+    if (Layer* l = edit_layer(app)) {
+        app.clip_layer = *l;
+        app.has_clip_layer = true;
+    }
+}
+
+void layer_paste(App& app) {
+    Scene* s = edit_scene(app);
+    if (!s || !app.has_clip_layer || static_cast<int>(s->layers.size()) >= kMaxLayers) return;
+    Layer l = app.clip_layer;
+    l.start = std::min(l.start, std::max(0.0, s->seconds - 0.3));
+    s->layers.push_back(l);
+    select_layer(app, static_cast<int>(s->layers.size()) - 1);
+    touch(app);
+}
+
+void pick_music_file(App& app) {
+#ifdef _WIN32
+    if (!app.has_board) return;
+    std::string path = open_dialog(app.window, L"Audio (MP3, WAV, M4A, WMA, AAC)\0*.mp3;*.wav;*.m4a;*.wma;*.aac\0\0");
+    if (path.empty()) return;
+    std::string err;
+    app.status = tr(app.cfg, "Müzik okunuyor...", "Reading music...");
+    if (!load_audio(path, &err)) {
+        app.status = std::string(tr(app.cfg, "Bu ses dosyası açılamadı: ", "Could not open this audio file: ")) + err;
+        return;
+    }
+    app.board.music_file = path;
+    touch(app);
+    app.status = std::string(tr(app.cfg, "Müzik eklendi: ", "Music added: ")) + file_name_of(path);
+#else
+    (void)app;
+#endif
+}
+
 // ---------------------------------------------------------------- soundtrack preview
 
 void stop_audio(App& app) {
@@ -1439,6 +1621,8 @@ void scene_menu(App& app, int i) {
     std::string auto_anim = opt_label(app.cfg, kAnimOpts, resolve_anim(app.board, i));
     if (opt_menu(app.cfg, ic::type, "Yazı animasyonu", "Text animation", kAnimOpts, s.anim, true, auto_anim)) touch(app);
     if (opt_menu(app.cfg, ic::move, "Kamera hareketi", "Camera motion", kMotionOpts, s.motion)) touch(app);
+    if (opt_menu(app.cfg, ic::camera, "Kamera (elle)", "Camera (manual)", kCameraOpts, s.camera)) touch(app);
+    if (opt_menu(app.cfg, ic::wand, "Filtre", "Filter", kFilterOpts, s.look.filter)) touch(app);
     if (submenu_begin(ic::palette, tr(app.cfg, "Görünüm", "Look"))) {
         for (int k = 0; k < 9; k++) {
             const char* lab = k == 0 ? tr(app.cfg, "Videodan", "From video") : tr(app.cfg, kStyles[k].tr, kStyles[k].en);
@@ -1481,7 +1665,37 @@ void music_menu_items(App& app) {
         save_soundtrack(app);
 }
 
-void preview_menu(App& app) {
+void layer_menu_items(App& app, float at_x = 0.5f, float at_y = 0.5f) {
+    Scene* s = edit_scene(app);
+    bool room = s && static_cast<int>(s->layers.size()) < kMaxLayers;
+    if (menu_item(ic::type, tr(app.cfg, "Yazı ekle", "Add text"), "T", false, room)) layer_add(app, "text", at_x, at_y);
+    if (menu_item(ic::image_plus, tr(app.cfg, "Görsel / logo ekle...", "Add image / logo..."), nullptr, false, room))
+        layer_add(app, "image", at_x, at_y);
+    if (menu_item(ic::square_plus, tr(app.cfg, "Kutu / şerit ekle", "Add box / bar"), nullptr, false, room)) layer_add(app, "box", at_x, at_y);
+    if (app.has_clip_layer && menu_item(ic::paste, tr(app.cfg, "Katmanı yapıştır", "Paste layer"), "Ctrl+V", false, room)) layer_paste(app);
+    if (Layer* l = edit_layer(app)) {
+        (void)l;
+        int k = app.sel_layer, n = static_cast<int>(s->layers.size());
+        ImGui::Separator();
+        if (menu_item(ic::copy, tr(app.cfg, "Katmanı çoğalt", "Duplicate layer"), "Ctrl+D", false, room)) layer_duplicate(app, k);
+        if (menu_item(ic::clipboard, tr(app.cfg, "Katmanı kopyala", "Copy layer"), "Ctrl+C")) layer_copy(app);
+        if (menu_item(ic::layers, tr(app.cfg, "Öne getir", "Bring to front"), nullptr, false, k + 1 < n)) layer_order(app, k, n - 1);
+        if (menu_item(ic::layers, tr(app.cfg, "Arkaya gönder", "Send to back"), nullptr, false, k > 0)) layer_order(app, k, 0);
+        if (menu_item(ic::scan, tr(app.cfg, "Ortala", "Centre"))) {
+            s->layers[static_cast<size_t>(k)].x = 0.5;
+            s->layers[static_cast<size_t>(k)].y = 0.5;
+            touch(app);
+        }
+        if (menu_item(ic::trash, tr(app.cfg, "Katmanı sil", "Delete layer"), "Del", false, true, kRed)) layer_delete(app, k);
+    }
+}
+
+void preview_menu(App& app, float at_x = 0.5f, float at_y = 0.5f) {
+    if (app.has_board) {
+        menu_heading(tr(app.cfg, "ELLE DÜZENLE", "EDIT BY HAND"));
+        layer_menu_items(app, at_x, at_y);
+        ImGui::Separator();
+    }
     if (menu_item(app.playing ? ic::pause : ic::play, app.playing ? tr(app.cfg, "Duraklat", "Pause") : tr(app.cfg, "Oynat", "Play"), "Space"))
         toggle_play(app);
     if (menu_item(ic::restart, tr(app.cfg, "Baştan oynat", "Play from start"))) {
@@ -2144,6 +2358,278 @@ void draw_sidebar(App& app, ImVec2 a, ImVec2 b) {
 
 // ---------------------------------------------------------------- studio
 
+// Direct manipulation of the selected scene's layers on top of the preview image. Returns true while the mouse is
+// over a layer so the play hint stays out of the way.
+bool edit_on_preview(App& app, ImVec2 ip, ImVec2 iq, bool hot) {
+    ImDrawList* dl = g_root;
+    ImGuiIO& io = ImGui::GetIO();
+    const float W = static_cast<float>(app.board.width), H = static_cast<float>(app.board.height);
+    const float k = (iq.x - ip.x) / std::max(1.f, W);
+    int si = scene_at(app.board, app.play_t);
+    if (!app.playing && si != app.selected) app.selected = si;
+    if (app.layer_scene != app.selected) {
+        app.sel_layer = -1;
+        app.layer_scene = app.selected;
+    }
+    Scene& s = app.board.scenes[static_cast<size_t>(si)];
+    const double local = app.play_t - scene_start(app.board, si);
+    const bool editable = !app.playing && si == app.selected;
+    const ImVec2 m = io.MousePos;
+    const float mfx = (m.x - ip.x) / k, mfy = (m.y - ip.y) / k;
+
+    struct Geo {
+        float cx = 0, cy = 0, w = 0, h = 0, deg = 0;
+    };
+    auto geo = [&](int li, Geo& g) {
+        if (!layer_box(app.board, si, li, g.cx, g.cy, g.w, g.h)) return false;
+        const Layer& l = s.layers[static_cast<size_t>(li)];
+        g.deg = l.kind == "text" ? 0.f : static_cast<float>(l.rotation);
+        return true;
+    };
+    auto to_local = [](const Geo& g, float fx, float fy, float& u, float& v) {
+        float r = g.deg * 3.14159265f / 180.f, cs = std::cos(r), sn = std::sin(r);
+        float dx = fx - g.cx, dy = fy - g.cy;
+        u = dx * cs + dy * sn;
+        v = -dx * sn + dy * cs;
+    };
+    auto to_screen = [&](const Geo& g, float u, float v) {
+        float r = g.deg * 3.14159265f / 180.f, cs = std::cos(r), sn = std::sin(r);
+        return ImVec2(ip.x + (g.cx + u * cs - v * sn) * k, ip.y + (g.cy + u * sn + v * cs) * k);
+    };
+    auto hit_layer = [&]() {
+        for (int li = static_cast<int>(s.layers.size()) - 1; li >= 0; li--) {
+            if (!layer_visible(app.board, si, li, local) && li != app.sel_layer) continue;
+            Geo g;
+            if (!geo(li, g)) continue;
+            float u, v, pad = P(4) / k;
+            to_local(g, mfx, mfy, u, v);
+            if (std::fabs(u) <= g.w * 0.5f + pad && std::fabs(v) <= g.h * 0.5f + pad) return li;
+        }
+        return -1;
+    };
+
+    Layer* sel = editable ? edit_layer(app) : nullptr;
+    Geo sg;
+    bool has_sel = sel && geo(app.sel_layer, sg);
+    int handle = kDragNone;
+    const float grab = P(9);
+    const float rot_off = P(26) / k;
+    if (has_sel && hot) {
+        const float cu[4] = {-1, 1, 1, -1}, cv[4] = {-1, -1, 1, 1};
+        for (int q = 0; q < 4 && !handle; q++) {
+            ImVec2 p = to_screen(sg, cu[q] * sg.w * 0.5f, cv[q] * sg.h * 0.5f);
+            if (std::fabs(m.x - p.x) < grab && std::fabs(m.y - p.y) < grab) handle = kDragScale;
+        }
+        if (!handle && sel->kind != "image")
+            for (int q = -1; q <= 1 && !handle; q += 2) {
+                ImVec2 p = to_screen(sg, q * sg.w * 0.5f, 0.f);
+                if (std::fabs(m.x - p.x) < grab && std::fabs(m.y - p.y) < grab * 1.6f) handle = kDragWidth;
+            }
+        if (!handle && sel->kind != "text") {
+            ImVec2 p = to_screen(sg, 0.f, -sg.h * 0.5f - rot_off);
+            if (std::fabs(m.x - p.x) < grab && std::fabs(m.y - p.y) < grab) handle = kDragRotate;
+        }
+    }
+    int hover = hot && editable && !handle ? hit_layer() : -1;
+
+    if (ImGui::IsItemActivated()) {
+        app.drag_from = m;
+        app.drag_moved = false;
+        app.click_play = false;
+        app.drag_mode = kDragNone;
+        if (app.pick_focus) {
+            s.focus_x = std::clamp(mfx / W, 0.f, 1.f);
+            s.focus_y = std::clamp(mfy / H, 0.f, 1.f);
+            app.pick_focus = false;
+            touch(app);
+        } else if (handle) {
+            app.drag_mode = handle;
+            app.drag_start = *sel;
+            app.drag_hw = sg.w * 0.5f;
+            app.drag_hh = sg.h * 0.5f;
+        } else if (hover >= 0) {
+            select_layer(app, hover);
+            app.drag_mode = kDragMove;
+            app.drag_start = s.layers[static_cast<size_t>(hover)];
+        } else {
+            app.click_play = app.sel_layer < 0 || app.playing;
+            app.sel_layer = -1;
+        }
+    }
+    if (ImGui::IsItemActive() && app.drag_mode != kDragNone) {
+        Layer* l = edit_layer(app);
+        ImVec2 d = m - app.drag_from;
+        if (!app.drag_moved && std::fabs(d.x) + std::fabs(d.y) >= P(2)) app.drag_moved = true;
+        if (l && app.drag_moved) {
+            const Layer& st = app.drag_start;
+            app.snap_x = app.snap_y = false;
+            float cx0 = static_cast<float>(st.x) * W, cy0 = static_cast<float>(st.y) * H;
+            float fx0 = (app.drag_from.x - ip.x) / k, fy0 = (app.drag_from.y - ip.y) / k;
+            if (app.drag_mode == kDragMove) {
+                float dx = d.x / k / W, dy = d.y / k / H;
+                if (io.KeyShift) (std::fabs(dx) > std::fabs(dy) ? dy : dx) = 0.f;
+                double nx = st.x + dx, ny = st.y + dy;
+                if (!io.KeyAlt) {
+                    float th = P(7) / k;
+                    if (std::fabs(static_cast<float>(nx) * W - W * 0.5f) < th) nx = 0.5, app.snap_x = true;
+                    if (std::fabs(static_cast<float>(ny) * H - H * 0.5f) < th) ny = 0.5, app.snap_y = true;
+                }
+                l->x = nx;
+                l->y = ny;
+            } else if (app.drag_mode == kDragScale || app.drag_mode == kDragWidth) {
+                // The opposite corner (or side) stays put; Alt scales around the centre instead.
+                Geo g{cx0, cy0, 0, 0, st.kind == "text" ? 0.f : static_cast<float>(st.rotation)};
+                float u, v, u0, v0;
+                to_local(g, mfx, mfy, u, v);
+                to_local(g, fx0, fy0, u0, v0);
+                const float hw = std::max(1.f, app.drag_hw), hh = std::max(1.f, app.drag_hh);
+                const float su = u0 < 0.f ? -1.f : 1.f, sv = v0 < 0.f ? -1.f : 1.f;
+                const bool centre = io.KeyAlt;
+                const float au = centre ? 0.f : -su * hw, av = centre ? 0.f : -sv * hh;
+                float nu = 0.f, nv = 0.f;
+                if (app.drag_mode == kDragWidth) {
+                    float span = std::max(P(12) / k, centre ? 2.f * std::fabs(u) : su * (u - au));
+                    l->w = span / W;
+                    nu = centre ? 0.f : au + su * span * 0.5f;
+                } else if (st.kind == "text" || st.kind == "image" || io.KeyShift) {
+                    float cu = su * hw - au, cv = sv * hh - av;
+                    float f = ((u - au) * cu + (v - av) * cv) / std::max(1.f, cu * cu + cv * cv);
+                    f = std::max(0.05f, f);
+                    if (st.kind == "text") l->size = st.size * f;
+                    l->w = st.w * f;
+                    if (st.kind == "box") l->h = st.h * f;
+                    nu = centre ? 0.f : au + cu * f * 0.5f;
+                    nv = centre ? 0.f : av + cv * f * 0.5f;
+                } else {
+                    float spu = std::max(P(8) / k, centre ? 2.f * std::fabs(u) : su * (u - au));
+                    float spv = std::max(P(8) / k, centre ? 2.f * std::fabs(v) : sv * (v - av));
+                    l->w = spu / W;
+                    l->h = spv / H;
+                    nu = centre ? 0.f : au + su * spu * 0.5f;
+                    nv = centre ? 0.f : av + sv * spv * 0.5f;
+                }
+                const float r = g.deg * 3.14159265f / 180.f, cs = std::cos(r), sn = std::sin(r);
+                l->x = (cx0 + nu * cs - nv * sn) / W;
+                l->y = (cy0 + nu * sn + nv * cs) / H;
+            } else if (app.drag_mode == kDragRotate) {
+                float a0 = std::atan2(fy0 - cy0, fx0 - cx0), a1 = std::atan2(mfy - cy0, mfx - cx0);
+                float deg = static_cast<float>(st.rotation) + (a1 - a0) * 180.f / 3.14159265f;
+                while (deg > 180.f) deg -= 360.f;
+                while (deg < -180.f) deg += 360.f;
+                if (io.KeyShift) deg = std::round(deg / 15.f) * 15.f;
+                else if (std::fabs(deg) < 3.f) deg = 0.f;
+                l->rotation = deg;
+            }
+            normalize_layer(*l);
+            app.interacting = true;
+            touch(app);
+        }
+    }
+    if (ImGui::IsItemDeactivated()) {
+        if (app.click_play && !app.drag_moved) toggle_play(app);
+        app.drag_mode = kDragNone;
+        app.interacting = false;
+        app.snap_x = app.snap_y = false;
+    }
+    if (hot && editable && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        app.click_play = false;
+        if (app.playing) app.playing = false;
+        int li = hit_layer();
+        if (li >= 0) {
+            select_layer(app, li);
+            if (s.layers[static_cast<size_t>(li)].kind == "text") app.focus_layer_text = true;
+        } else if (layer_add(app, "text", std::clamp(mfx / W, 0.05f, 0.95f), std::clamp(mfy / H, 0.05f, 0.95f))) {
+            app.focus_layer_text = true;
+        }
+    }
+    if (hot && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        if (editable) {
+            int li = hit_layer();
+            if (li >= 0) select_layer(app, li);
+        }
+        app.menu_fx = std::clamp(mfx / W, 0.05f, 0.95f);
+        app.menu_fy = std::clamp(mfy / H, 0.05f, 0.95f);
+        ImGui::OpenPopup("preview_menu");
+    }
+
+    if (handle == kDragScale || app.drag_mode == kDragScale) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+    else if (handle == kDragWidth || app.drag_mode == kDragWidth) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    else if (handle == kDragRotate || app.drag_mode == kDragRotate) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    else if (hover >= 0 || app.drag_mode == kDragMove) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+
+    dl->PushClipRect(ip - ImVec2(P(40), P(40)), iq + ImVec2(P(40), P(40)), true);
+    auto outline = [&](const Geo& g, ImU32 col, float th) {
+        ImVec2 c4[4] = {to_screen(g, -g.w * 0.5f, -g.h * 0.5f), to_screen(g, g.w * 0.5f, -g.h * 0.5f),
+                        to_screen(g, g.w * 0.5f, g.h * 0.5f), to_screen(g, -g.w * 0.5f, g.h * 0.5f)};
+        dl->AddPolyline(c4, 4, col, ImDrawFlags_Closed, th);
+    };
+    if (app.snap_x) dl->AddLine(ImVec2((ip.x + iq.x) * 0.5f, ip.y), ImVec2((ip.x + iq.x) * 0.5f, iq.y), IM_COL32(255, 70, 200, 220), P(1.2f));
+    if (app.snap_y) dl->AddLine(ImVec2(ip.x, (ip.y + iq.y) * 0.5f), ImVec2(iq.x, (ip.y + iq.y) * 0.5f), IM_COL32(255, 70, 200, 220), P(1.2f));
+    if (hover >= 0 && hover != app.sel_layer) {
+        Geo g;
+        if (geo(hover, g)) outline(g, with_alpha(kAccent, 150), P(1));
+    }
+    if (has_sel) {
+        bool shown = layer_visible(app.board, si, app.sel_layer, local);
+        ImU32 col = shown ? kAccent : with_alpha(kAccent, 110);
+        outline(sg, col, P(1.5f));
+        const float cu[4] = {-1, 1, 1, -1}, cv[4] = {-1, -1, 1, 1};
+        float hs = P(4.5f);
+        for (int q = 0; q < 4; q++) {
+            ImVec2 p = to_screen(sg, cu[q] * sg.w * 0.5f, cv[q] * sg.h * 0.5f);
+            dl->AddRectFilled(p - ImVec2(hs, hs), p + ImVec2(hs, hs), IM_COL32_WHITE, P(1.5f));
+            dl->AddRect(p - ImVec2(hs, hs), p + ImVec2(hs, hs), col, P(1.5f), 0, P(1.2f));
+        }
+        if (sel->kind != "image")
+            for (int q = -1; q <= 1; q += 2) {
+                ImVec2 p = to_screen(sg, q * sg.w * 0.5f, 0.f);
+                dl->AddRectFilled(p - ImVec2(P(3), P(8)), p + ImVec2(P(3), P(8)), IM_COL32_WHITE, P(2));
+                dl->AddRect(p - ImVec2(P(3), P(8)), p + ImVec2(P(3), P(8)), col, P(2), 0, P(1.2f));
+            }
+        if (sel->kind != "text") {
+            ImVec2 top = to_screen(sg, 0.f, -sg.h * 0.5f), knob = to_screen(sg, 0.f, -sg.h * 0.5f - rot_off);
+            dl->AddLine(top, knob, col, P(1.2f));
+            dl->AddCircleFilled(knob, P(5.5f), IM_COL32_WHITE, 20);
+            dl->AddCircle(knob, P(5.5f), col, 20, P(1.4f));
+        }
+        const char* kinds[] = {"Yazı", "Görsel", "Kutu"};
+        const char* kinds_en[] = {"Text", "Image", "Box"};
+        int ki = sel->kind == "image" ? 1 : sel->kind == "box" ? 2 : 0;
+        std::string tag = std::string(tr(app.cfg, kinds[ki], kinds_en[ki])) + " " + std::to_string(app.sel_layer + 1);
+        if (!shown) tag += tr(app.cfg, "  \xC2\xB7  bu anda gizli", "  \xC2\xB7  hidden now");
+        if (app.drag_mode == kDragRotate || (sel->kind != "text" && sel->rotation != 0)) {
+            char deg[24];
+            std::snprintf(deg, sizeof deg, "  \xC2\xB7  %.0f\xC2\xB0", sel->rotation);
+            tag += deg;
+        }
+        ImVec2 tp = to_screen(sg, -sg.w * 0.5f, -sg.h * 0.5f);
+        ImVec2 ts = text_size(F.tiny, tag.c_str());
+        ImVec2 ta(tp.x, tp.y - ts.y - P(8));
+        dl->AddRectFilled(ta, ta + ts + ImVec2(P(10), P(4)), col, P(4));
+        draw_text(dl, F.tiny, ta + ImVec2(P(5), P(2)), kInk, tag.c_str());
+    }
+    bool show_focus = editable && (app.pick_focus || (app.page == kEdit && app.edit_tab == kTabColor)) && !s.image.empty();
+    if (show_focus) {
+        ImVec2 fp(ip.x + static_cast<float>(s.focus_x) * W * k, ip.y + static_cast<float>(s.focus_y) * H * k);
+        dl->AddCircle(fp, P(10), IM_COL32_WHITE, 24, P(1.5f));
+        dl->AddCircle(fp, P(3), kAccent, 12, P(2));
+        dl->AddLine(fp - ImVec2(P(16), 0), fp - ImVec2(P(11), 0), IM_COL32_WHITE, P(1.5f));
+        dl->AddLine(fp + ImVec2(P(11), 0), fp + ImVec2(P(16), 0), IM_COL32_WHITE, P(1.5f));
+        dl->AddLine(fp - ImVec2(0, P(16)), fp - ImVec2(0, P(11)), IM_COL32_WHITE, P(1.5f));
+        dl->AddLine(fp + ImVec2(0, P(11)), fp + ImVec2(0, P(16)), IM_COL32_WHITE, P(1.5f));
+    }
+    if (app.pick_focus) {
+        const char* msg = tr(app.cfg, "Görselde odaklanılacak noktaya tıklayın", "Click the point of the photo to keep in focus");
+        ImVec2 ts = text_size(F.small, msg);
+        ImVec2 mp((ip.x + iq.x - ts.x) * 0.5f - P(10), ip.y + P(44));
+        dl->AddRectFilled(mp, mp + ts + ImVec2(P(20), P(10)), IM_COL32(0, 0, 0, 200), P(6));
+        draw_text(dl, F.small, mp + ImVec2(P(10), P(5)), kAccent, msg);
+        if (hot) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+    dl->PopClipRect();
+    return hover >= 0 || handle != kDragNone;
+}
+
 void draw_preview(App& app, ImVec2 a, ImVec2 b) {
     ImDrawList* dl = g_root;
     dl->AddRectFilled(a, b, IM_COL32(3, 6, 9, 255), P(10));
@@ -2179,11 +2665,11 @@ void draw_preview(App& app, ImVec2 a, ImVec2 b) {
     dl->AddImageRounded((ImTextureID)(intptr_t)app.tex, ip, iq, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, P(6));
 
     ImGui::SetCursorScreenPos(ip);
-    if (ImGui::InvisibleButton("preview_click", iq - ip)) toggle_play(app);
-    open_menu_on_right_click("preview_menu");
+    ImGui::InvisibleButton("preview_click", iq - ip);
     bool hot = ImGui::IsItemHovered();
+    bool over_layer = edit_on_preview(app, ip, iq, hot);
     if (menu_begin("preview_menu")) {
-        preview_menu(app);
+        preview_menu(app, app.menu_fx, app.menu_fy);
         menu_end();
     }
 
@@ -2220,7 +2706,7 @@ void draw_preview(App& app, ImVec2 a, ImVec2 b) {
     ImVec2 c((ip.x + iq.x) * 0.5f, (ip.y + iq.y) * 0.5f);
     dl->AddLine(ImVec2(c.x - P(9), c.y), ImVec2(c.x + P(9), c.y), with_alpha(IM_COL32_WHITE, 110), 1.f);
     dl->AddLine(ImVec2(c.x, c.y - P(9)), ImVec2(c.x, c.y + P(9)), with_alpha(IM_COL32_WHITE, 110), 1.f);
-    if (hot && !app.playing) {
+    if (hot && !app.playing && !over_layer && app.sel_layer < 0 && !app.pick_focus) {
         dl->AddCircleFilled(c, P(30), IM_COL32(0, 0, 0, 150), 40);
         dl->AddCircle(c, P(30), with_alpha(kAccent, 200), 40, P(1.5f));
         dl->AddTriangleFilled(ImVec2(c.x - P(8), c.y - P(12)), ImVec2(c.x - P(8), c.y + P(12)), ImVec2(c.x + P(13), c.y), kAccent);
@@ -2519,6 +3005,494 @@ void draw_ai_panel(App& app) {
     }
 }
 
+void draw_scene_tab(App& app, Scene& s, float w);
+void draw_sound_tab(App& app, float w);
+
+bool slider_row(const char* id, const char* label, float& v, float lo, float hi, const char* fmt, float w, float cw,
+                float reset = NAN) {
+    row_label(label, w, cw);
+    push_field();
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(P(10), P(5)));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, v4(kAccent));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, v4(kAccent));
+    ImGui::SetNextItemWidth(cw);
+    bool changed = ImGui::SliderFloat(id, &v, lo, hi, fmt);
+    if (!std::isnan(reset) && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+        v = reset;
+        changed = true;
+    }
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar();
+    pop_field();
+    return changed;
+}
+
+bool color_row(const char* id, const char* label, std::string& hex, float w, float cw, const char* fallback = "#ffffff") {
+    unsigned char rgb[3];
+    if (!parse_hex_color(hex, rgb)) parse_hex_color(fallback, rgb);
+    float col[3] = {rgb[0] / 255.f, rgb[1] / 255.f, rgb[2] / 255.f};
+    row_label(label, w, cw);
+    ImGui::PushID(id);
+    bool changed = false;
+    if (ImGui::ColorEdit3("##c", col, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) {
+        for (int c = 0; c < 3; c++) rgb[c] = static_cast<unsigned char>(std::clamp(col[c], 0.f, 1.f) * 255.f + 0.5f);
+        hex = hex_color(rgb);
+        changed = true;
+    }
+    const char* swatches[] = {"#ffffff", "#111111", "#ffd84d", "#28e2e8", "#ff3b30", "#ff4f8b", "#7cff6b"};
+    for (const char* sw : swatches) {
+        ImGui::SameLine(0.f, P(4));
+        unsigned char c3[3];
+        parse_hex_color(sw, c3);
+        ImGui::PushID(sw);
+        ImVec2 sp = ImGui::GetCursorScreenPos();
+        float sz = P(18);
+        ImGui::SetCursorScreenPos(sp + ImVec2(0, P(2)));
+        if (ImGui::InvisibleButton("sw", ImVec2(sz, sz))) {
+            hex = sw;
+            changed = true;
+        }
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        sp.y += P(2);
+        dl->AddRectFilled(sp, sp + ImVec2(sz, sz), IM_COL32(c3[0], c3[1], c3[2], 255), P(4));
+        dl->AddRect(sp, sp + ImVec2(sz, sz), hex == sw ? kText : kLine, P(4), 0, hex == sw ? P(1.6f) : 1.f);
+        ImGui::PopID();
+    }
+    ImGui::PopID();
+    return changed;
+}
+
+template <size_t N>
+bool opt_row(App& app, const char* id, const char* label, const Opt (&opts)[N], std::string& value, float w, float cw) {
+    std::vector<std::string> items;
+    for (const auto& o : opts) items.push_back(tr(app.cfg, o.tr, o.en));
+    int cur = opt_index(opts, value);
+    row_label(label, w, cw);
+    if (combo(id, cur, items, cw)) {
+        value = opts[cur].id;
+        return true;
+    }
+    return false;
+}
+
+std::string layer_name(const App& app, const Layer& l) {
+    if (l.kind == "image") return l.image.empty() ? tr(app.cfg, "Görsel", "Image") : file_name_of(l.image);
+    if (l.kind == "box") return tr(app.cfg, "Kutu", "Box");
+    std::string t = l.text;
+    for (char& c : t)
+        if (c == '\n' || c == '*') c = ' ';
+    t = tidy(t);
+    return t.empty() ? std::string(tr(app.cfg, "Boş yazı", "Empty text")) : t;
+}
+
+void draw_layers_tab(App& app, Scene& s, float w) {
+    bool room = static_cast<int>(s.layers.size()) < kMaxLayers;
+    float bw = (w - P(12)) / 3.f;
+    if (button("ladd_t", ic::type, tr(app.cfg, "Yazı", "Text"), ImVec2(bw, P(36)), kOutline, room)) layer_add(app, "text");
+    ImGui::SameLine(0.f, P(6));
+    if (button("ladd_i", ic::image_plus, tr(app.cfg, "Görsel", "Image"), ImVec2(bw, P(36)), kOutline, room)) layer_add(app, "image");
+    ImGui::SameLine(0.f, P(6));
+    if (button("ladd_b", ic::square_plus, tr(app.cfg, "Kutu", "Box"), ImVec2(bw, P(36)), kOutline, room)) layer_add(app, "box");
+    ImGui::Dummy(ImVec2(0.f, P(2)));
+    caption(tr(app.cfg, "Önizlemede katmanı sürükleyerek taşı, köşesinden büyüt, üstteki tutamaktan döndür. Boş bir yere çift "
+                        "tıklarsan oraya yazı eklenir. Shift eksene kilitler, Alt hizalamayı kapatır.",
+               "Drag a layer on the preview to move it, pull a corner to resize, use the top knob to rotate. Double-click an "
+               "empty spot to add text there. Shift locks the axis, Alt turns snapping off."),
+            w);
+    ImGui::Dummy(ImVec2(0.f, P(4)));
+    int n = static_cast<int>(s.layers.size());
+    if (!n) {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float h = P(84);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRect(p, p + ImVec2(w, h), kLine, P(10), 0, 1.f);
+        const char* is = I(ic::layers);
+        ImVec2 isz = text_size(F.h1, is);
+        draw_text(dl, F.h1, ImVec2(p.x + (w - isz.x) * 0.5f, p.y + P(14)), kDim, is);
+        const char* t = tr(app.cfg, "Bu sahnede henüz katman yok", "No layers in this scene yet");
+        draw_text(dl, F.small, ImVec2(p.x + (w - text_size(F.small, t).x) * 0.5f, p.y + P(52)), kMuted, t);
+        ImGui::Dummy(ImVec2(w, h));
+        return;
+    }
+
+    const double scene_t0 = scene_start(app.board, app.selected);
+    int open_menu = -1;
+    for (int li = n - 1; li >= 0; li--) {
+        Layer& l = s.layers[static_cast<size_t>(li)];
+        ImGui::PushID(1500 + li);
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float rh = P(38);
+        bool on = app.layer_scene == app.selected && app.sel_layer == li;
+        ImGui::SetNextItemAllowOverlap();
+        bool clicked = ImGui::InvisibleButton("lrow", ImVec2(w, rh));
+        bool hov = ImGui::IsItemHovered();
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            select_layer(app, li);
+            open_menu = li;
+        }
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p, p + ImVec2(w, rh), on ? with_alpha(kAccent, 26) : hov ? kRaised : kPanel2, P(7));
+        dl->AddRect(p, p + ImVec2(w, rh), on ? with_alpha(kAccent, 200) : kLine, P(7), 0, on ? P(1.2f) : 1.f);
+        uint32_t icon = l.kind == "image" ? ic::image : l.kind == "box" ? ic::box : ic::type;
+        unsigned char rgb[3] = {255, 255, 255};
+        parse_hex_color(l.kind == "box" ? l.fill : l.color, rgb);
+        float cy = p.y + rh * 0.5f;
+        dl->AddRectFilled(ImVec2(p.x + P(8), cy - P(10)), ImVec2(p.x + P(28), cy + P(10)), IM_COL32(rgb[0], rgb[1], rgb[2], 60), P(5));
+        draw_text(dl, F.small, ImVec2(p.x + P(12), cy - F.small->FontSize * 0.5f), on ? kAccent : kSoft, I(icon));
+        double end = l.end > l.start ? std::min(l.end, s.seconds) : s.seconds;
+        char span[48];
+        std::snprintf(span, sizeof span, "%.1f\xE2\x80\x93%.1f", l.start, end);
+        float sw = text_size(F.tiny, span).x;
+        float bx = p.x + w - P(64);
+        draw_text(dl, F.tiny, ImVec2(bx - sw - P(8), cy - F.tiny->FontSize * 0.5f), kMuted, span);
+        std::string name = fit(F.small, layer_name(app, l), bx - sw - P(20) - (p.x + P(36)));
+        draw_text(dl, F.small, ImVec2(p.x + P(36), cy - F.small->FontSize * 0.5f), on ? kText : kSoft, name.c_str());
+        ImGui::SetCursorScreenPos(ImVec2(bx, p.y + P(5)));
+        if (icon_button("ldup", ic::copy, ImVec2(P(28), P(28)), false, room, tr(app.cfg, "Çoğalt", "Duplicate"))) {
+            layer_duplicate(app, li);
+            ImGui::PopID();
+            break;
+        }
+        ImGui::SameLine(0.f, P(2));
+        if (icon_button("ldel", ic::trash, ImVec2(P(28), P(28)), false, true, tr(app.cfg, "Sil", "Delete"))) {
+            layer_delete(app, li);
+            ImGui::PopID();
+            break;
+        }
+        if (clicked) {
+            select_layer(app, li);
+            double lt = app.play_t - scene_t0;
+            if (!layer_visible(app.board, app.selected, li, lt)) {
+                app.play_t = static_cast<float>(scene_t0 + std::min(l.start + 0.6, std::max(l.start, end - 0.05)));
+                app.playing = false;
+            }
+        }
+        ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + rh + P(4)));
+        ImGui::PopID();
+    }
+    if (open_menu >= 0) ImGui::OpenPopup("layer_row_menu");
+    if (menu_begin("layer_row_menu")) {
+        layer_menu_items(app);
+        menu_end();
+    }
+
+    Layer* l = edit_layer(app);
+    if (!l) {
+        caption(tr(app.cfg, "Düzenlemek için listeden ya da önizlemeden bir katman seçin.", "Pick a layer in the list or on the preview to edit it."),
+                w);
+        return;
+    }
+    int k = app.sel_layer;
+    divider(w);
+    {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        section(l->kind == "image" ? tr(app.cfg, "Görsel katmanı", "Image layer")
+                : l->kind == "box" ? tr(app.cfg, "Kutu katmanı", "Box layer")
+                                   : tr(app.cfg, "Yazı katmanı", "Text layer"));
+        ImVec2 after = ImGui::GetCursorScreenPos();
+        float ib = P(28);
+        ImGui::SetCursorScreenPos(ImVec2(p.x + w - ib * 2 - P(4), p.y - P(4)));
+        if (icon_button("lup", ic::up, ImVec2(ib, ib), false, k + 1 < static_cast<int>(s.layers.size()),
+                        tr(app.cfg, "Bir öne al", "Bring forward")))
+            layer_order(app, k, k + 1);
+        ImGui::SameLine(0.f, P(4));
+        if (icon_button("ldown", ic::down, ImVec2(ib, ib), false, k > 0, tr(app.cfg, "Bir arkaya al", "Send backward")))
+            layer_order(app, k, k - 1);
+        ImGui::SetCursorScreenPos(after);
+        l = edit_layer(app);
+        if (!l) return;
+    }
+
+    if (l->kind == "text") {
+        push_field();
+        if (app.focus_layer_text) {
+            ImGui::SetKeyboardFocusHere();
+            app.focus_layer_text = false;
+        }
+        if (ImGui::InputTextMultiline("##ltext", &l->text, ImVec2(w, P(66)))) touch(app);
+        pop_field();
+        caption(tr(app.cfg, "Vurgulu kelime için *kelime* yaz.", "Write *word* to highlight a word."));
+    } else if (l->kind == "image") {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float h = P(38);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p, p + ImVec2(w, h), IM_COL32(6, 11, 16, 255), P(8));
+        dl->AddRect(p, p + ImVec2(w, h), kLine, P(8));
+        bool ok = image_readable(l->image);
+        draw_text(dl, F.ui, ImVec2(p.x + P(12), p.y + (h - F.ui->FontSize) * 0.5f), ok ? kAccent : kRed, I(ic::image));
+        draw_text(dl, F.small, ImVec2(p.x + P(38), p.y + (h - F.small->FontSize) * 0.5f), kText,
+                  fit(F.small, file_name_of(l->image), w - P(84)).c_str());
+        ImGui::SetCursorScreenPos(ImVec2(p.x + w - P(34), p.y + P(4)));
+        if (icon_button("limg", ic::folder_open, ImVec2(P(28), P(30)), false, true, tr(app.cfg, "Değiştir", "Change"))) {
+            std::string path = pick_image_path(app);
+            if (!path.empty()) {
+                l->image = path;
+                touch(app);
+            }
+        }
+        ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + h + P(6)));
+    }
+
+    ImGui::PushFont(F.small);
+    float cw = w * 0.58f;
+    float v = 0.f;
+    if (l->kind == "text") {
+        v = static_cast<float>(l->size * 100.0);
+        if (slider_row("##lsize", tr(app.cfg, "Yazı boyutu", "Text size"), v, 20.f, 600.f, "%.0f%%", w, cw, 100.f)) {
+            l->size = v / 100.0;
+            touch(app);
+        }
+        row_label(tr(app.cfg, "Hizalama", "Align"), w, cw);
+        const char* al[] = {"Sol", "Orta", "Sağ"};
+        const char* al_en[] = {"Left", "Centre", "Right"};
+        for (int a = 0; a < 3; a++) {
+            if (a) ImGui::SameLine(0.f, P(4));
+            ImGui::PushID(1700 + a);
+            if (chip("al", tr(app.cfg, al[a], al_en[a]), l->align == a)) {
+                l->align = a;
+                touch(app);
+            }
+            ImGui::PopID();
+        }
+        ImGui::PopFont();
+        if (toggle("lbold", tr(app.cfg, "Kalın", "Bold"), l->bold, w)) {
+            l->bold = !l->bold;
+            touch(app);
+        }
+        ImGui::PushFont(F.small);
+        if (color_row("lcol", tr(app.cfg, "Yazı rengi", "Text colour"), l->color, w, cw)) touch(app);
+        ImGui::PopFont();
+        bool bg = !l->fill.empty();
+        if (toggle("lbg", tr(app.cfg, "Arka plan kutusu", "Backdrop box"), bg, w)) {
+            l->fill = bg ? "" : "#000000";
+            touch(app);
+        }
+        ImGui::PushFont(F.small);
+        if (!l->fill.empty() && color_row("lfill", tr(app.cfg, "Kutu rengi", "Box colour"), l->fill, w, cw, "#000000")) touch(app);
+    } else if (l->kind == "box") {
+        if (color_row("lbox", tr(app.cfg, "Renk", "Colour"), l->fill, w, cw, "#28e2e8")) {
+            l->color = l->fill;
+            touch(app);
+        }
+    }
+
+    v = static_cast<float>(l->opacity * 100.0);
+    if (slider_row("##lop", tr(app.cfg, "Saydamlık", "Opacity"), v, 0.f, 100.f, "%.0f%%", w, cw, 100.f)) {
+        l->opacity = v / 100.0;
+        touch(app);
+    }
+    if (l->kind != "text" || !l->fill.empty()) {
+        v = static_cast<float>(l->radius);
+        if (slider_row("##lrad", tr(app.cfg, "Köşe yuvarlaklığı", "Corner radius"), v, 0.f, 120.f, "%.0f", w, cw, 0.f)) {
+            l->radius = v;
+            touch(app);
+        }
+    }
+    if (l->kind != "text") {
+        v = static_cast<float>(l->rotation);
+        if (slider_row("##lrot", tr(app.cfg, "Döndürme", "Rotation"), v, -180.f, 180.f, "%.0f\xC2\xB0", w, cw, 0.f)) {
+            l->rotation = v;
+            touch(app);
+        }
+    }
+    ImGui::PopFont();
+    if (toggle("lsh", tr(app.cfg, "Gölge", "Shadow"), l->shadow, w)) {
+        l->shadow = !l->shadow;
+        touch(app);
+    }
+
+    divider(w);
+    section(tr(app.cfg, "Konum ve boyut", "Position and size"));
+    ImGui::PushFont(F.small);
+    v = static_cast<float>(l->x * 100.0);
+    if (slider_row("##lx", tr(app.cfg, "Yatay (X)", "Horizontal (X)"), v, -20.f, 120.f, "%.1f%%", w, cw, 50.f)) {
+        l->x = v / 100.0;
+        touch(app);
+    }
+    v = static_cast<float>(l->y * 100.0);
+    if (slider_row("##ly", tr(app.cfg, "Dikey (Y)", "Vertical (Y)"), v, -20.f, 120.f, "%.1f%%", w, cw, 50.f)) {
+        l->y = v / 100.0;
+        touch(app);
+    }
+    v = static_cast<float>(l->w * 100.0);
+    if (slider_row("##lw", l->kind == "text" ? tr(app.cfg, "Satır genişliği", "Wrap width") : tr(app.cfg, "Genişlik", "Width"), v, 2.f,
+                   200.f, "%.0f%%", w, cw)) {
+        l->w = v / 100.0;
+        touch(app);
+    }
+    if (l->kind == "box") {
+        v = static_cast<float>(l->h * 100.0);
+        if (slider_row("##lh", tr(app.cfg, "Yükseklik", "Height"), v, 0.5f, 200.f, "%.1f%%", w, cw)) {
+            l->h = v / 100.0;
+            touch(app);
+        }
+    }
+    ImGui::PopFont();
+    {
+        float qb = (w - P(12)) / 4.f;
+        struct Snap {
+            const char* id;
+            const char* tr;
+            const char* en;
+            double x, y;
+        };
+        const Snap snaps[] = {{"sc", "Ortala", "Centre", 0.5, 0.5},
+                              {"st", "Üst", "Top", -1, 0.14},
+                              {"sm", "Orta", "Middle", -1, 0.5},
+                              {"sb", "Alt", "Bottom", -1, 0.84}};
+        for (int q = 0; q < 4; q++) {
+            if (q) ImGui::SameLine(0.f, P(4));
+            if (button(snaps[q].id, 0, tr(app.cfg, snaps[q].tr, snaps[q].en), ImVec2(qb, P(30)), kOutline)) {
+                if (snaps[q].x >= 0) l->x = snaps[q].x;
+                l->y = snaps[q].y;
+                touch(app);
+            }
+        }
+    }
+
+    divider(w);
+    section(tr(app.cfg, "Zamanlama ve animasyon", "Timing and animation"));
+    ImGui::PushFont(F.small);
+    float sec = static_cast<float>(s.seconds);
+    float st = static_cast<float>(l->start);
+    const char* sfmt = app.cfg.lang == "en" ? "%.2f s" : "%.2f sn";
+    if (slider_row("##lst", tr(app.cfg, "Başlangıç", "Starts at"), st, 0.f, std::max(0.1f, sec - 0.1f), sfmt, w, cw, 0.f)) {
+        l->start = st;
+        if (l->end > 0 && l->end <= l->start) l->end = std::min(static_cast<double>(sec), l->start + 0.5);
+        touch(app);
+    }
+    if (ImGui::IsItemActive()) app.play_t = static_cast<float>(scene_t0 + std::min(static_cast<double>(sec) - 0.02, l->start + 0.5));
+    bool to_end = l->end <= l->start;
+    float en = to_end ? sec : static_cast<float>(l->end);
+    if (slider_row("##len", tr(app.cfg, "Bitiş", "Ends at"), en, 0.f, sec, to_end ? tr(app.cfg, "Sahne sonu", "Scene end") : sfmt, w,
+                   cw, sec)) {
+        l->end = en >= sec - 0.02f ? 0.0 : std::max(static_cast<double>(en), l->start + 0.1);
+        touch(app);
+    }
+    if (ImGui::IsItemActive()) app.play_t = static_cast<float>(scene_t0 + std::max(0.0, std::min(static_cast<double>(sec), static_cast<double>(en)) - 0.05));
+    if (opt_row(app, "##lin", tr(app.cfg, "Giriş", "Entrance"), kLayerInOpts, l->in, w, cw)) {
+        touch(app);
+        app.play_t = static_cast<float>(scene_t0 + l->start);
+        app.play_from = app.play_t;
+        app.playing = false;
+        toggle_play(app);
+    }
+    if (opt_row(app, "##lout", tr(app.cfg, "Çıkış", "Exit"), kLayerOutOpts, l->out, w, cw)) touch(app);
+    ImGui::PopFont();
+
+    divider(w);
+    float hb = (w - P(8)) * 0.5f;
+    if (button("lall", ic::copy, tr(app.cfg, "Tüm sahnelere ekle", "Add to all scenes"), ImVec2(hb, P(34)), kOutline)) {
+        Layer copy = *l;
+        int added = 0;
+        for (int i = 0; i < static_cast<int>(app.board.scenes.size()); i++) {
+            Scene& o = app.board.scenes[static_cast<size_t>(i)];
+            if (i == app.selected || static_cast<int>(o.layers.size()) >= kMaxLayers) continue;
+            Layer c2 = copy;
+            if (c2.start >= o.seconds) c2.start = 0;
+            if (c2.end > o.seconds) c2.end = 0;
+            o.layers.push_back(c2);
+            added++;
+        }
+        if (added) touch(app);
+        app.status = std::to_string(added) + tr(app.cfg, " sahneye eklendi (logo ve filigran için ideal).", " scenes received the layer (handy for logos).");
+    }
+    ImGui::SameLine(0.f, P(8));
+    if (button("ldel2", ic::trash, tr(app.cfg, "Katmanı sil", "Delete layer"), ImVec2(hb, P(34)), kOutline)) layer_delete(app, k);
+}
+
+void draw_color_tab(App& app, Scene& s, float w) {
+    section(tr(app.cfg, "Filtre", "Filter"));
+    float used = 0.f;
+    for (int i = 0; i < static_cast<int>(std::size(kFilterOpts)); i++) {
+        ImGui::PushID(1800 + i);
+        if (wrap_chip("flt", tr(app.cfg, kFilterOpts[i].tr, kFilterOpts[i].en), s.look.filter == kFilterOpts[i].id, used, w)) {
+            s.look.filter = kFilterOpts[i].id;
+            touch(app);
+        }
+        ImGui::PopID();
+    }
+    ImGui::Dummy(ImVec2(0.f, P(4)));
+    section(tr(app.cfg, "Renk ayarı", "Colour adjust"));
+    caption(tr(app.cfg, "Sahnenin görüntüsüne uygulanır; elle eklediğin katmanlar etkilenmez. Sıfırlamak için çift tıkla.",
+               "Applies to the scene picture; your layers stay untouched. Double-click a slider to reset it."),
+            w);
+    ImGui::PushFont(F.small);
+    float cw = w * 0.58f;
+    struct Adj {
+        const char* id;
+        const char* tr;
+        const char* en;
+        double* v;
+        float lo;
+    };
+    Adj adj[] = {{"##lb", "Parlaklık", "Brightness", &s.look.brightness, -100.f},
+                 {"##lc", "Kontrast", "Contrast", &s.look.contrast, -100.f},
+                 {"##ls", "Doygunluk", "Saturation", &s.look.saturation, -100.f},
+                 {"##lw", "Sıcaklık", "Warmth", &s.look.warmth, -100.f},
+                 {"##lv", "Vinyet", "Vignette", &s.look.vignette, 0.f}};
+    for (auto& a : adj) {
+        float v = static_cast<float>(*a.v * 100.0);
+        if (slider_row(a.id, tr(app.cfg, a.tr, a.en), v, a.lo, 100.f, "%+.0f", w, cw, 0.f)) {
+            *a.v = v / 100.0;
+            touch(app);
+        }
+    }
+    ImGui::PopFont();
+    float hb = (w - P(8)) * 0.5f;
+    if (button("lkreset", ic::restart, tr(app.cfg, "Sıfırla", "Reset"), ImVec2(hb, P(34)), kOutline, s.look.active())) {
+        s.look = Look{};
+        touch(app);
+    }
+    ImGui::SameLine(0.f, P(8));
+    if (button("lkall", ic::copy, tr(app.cfg, "Tüm sahnelere uygula", "Apply to all scenes"), ImVec2(hb, P(34)), kOutline)) {
+        Look lk = s.look;
+        for (auto& o : app.board.scenes) o.look = lk;
+        touch(app);
+        app.status = tr(app.cfg, "Renk ayarı tüm sahnelere uygulandı.", "Colour settings applied to every scene.");
+    }
+
+    divider(w);
+    section(tr(app.cfg, "Kamera", "Camera"));
+    if (s.image.empty())
+        caption(tr(app.cfg, "Görselsiz sahnelerde kamera arka planı ve yazıyı hareket ettirir. Görsel ekleyince odak ve yakınlaştırma da açılır.",
+                   "Without an image the camera moves the background and text. Add an image to unlock focus and zoom."),
+                w);
+    ImGui::PushFont(F.small);
+    if (opt_row(app, "##cam", tr(app.cfg, "Hareket", "Move"), kCameraOpts, s.camera, w, cw)) touch(app);
+    if (s.camera == "auto") {
+        ImGui::PopFont();
+        caption(tr(app.cfg, "Otomatik: Sahne sekmesindeki kamera hareketi kullanılır.", "Auto: uses the camera motion from the Scene tab."), w);
+        ImGui::PushFont(F.small);
+    }
+    if (!s.image.empty()) {
+        if (opt_row(app, "##fit", tr(app.cfg, "Görsel yerleşimi", "Image fit"), kFitOpts, s.fit, w, cw)) touch(app);
+        float z = static_cast<float>(s.zoom * 100.0);
+        if (slider_row("##zoom", tr(app.cfg, "Yakınlaştırma", "Zoom"), z, 100.f, 300.f, "%.0f%%", w, cw, 100.f)) {
+            s.zoom = z / 100.0;
+            touch(app);
+        }
+        float fx = static_cast<float>(s.focus_x * 100.0), fy = static_cast<float>(s.focus_y * 100.0);
+        if (slider_row("##fx", tr(app.cfg, "Odak X", "Focus X"), fx, 0.f, 100.f, "%.0f%%", w, cw, 50.f)) {
+            s.focus_x = fx / 100.0;
+            touch(app);
+        }
+        if (slider_row("##fy", tr(app.cfg, "Odak Y", "Focus Y"), fy, 0.f, 100.f, "%.0f%%", w, cw, 50.f)) {
+            s.focus_y = fy / 100.0;
+            touch(app);
+        }
+    }
+    ImGui::PopFont();
+    if (!s.image.empty()) {
+        if (button("pfocus", ic::scan, app.pick_focus ? tr(app.cfg, "Önizlemede bir noktaya tıklayın...", "Click a point on the preview...")
+                                                       : tr(app.cfg, "Odağı önizlemede seç", "Pick focus on the preview"),
+                   ImVec2(w, P(34)), app.pick_focus ? kGlow : kOutline)) {
+            app.pick_focus = !app.pick_focus;
+            app.playing = false;
+        }
+    }
+}
+
 void draw_scene_settings(App& app) {
     float w = ImGui::GetContentRegionAvail().x;
     if (!app.has_board) {
@@ -2541,6 +3515,58 @@ void draw_scene_settings(App& app) {
         if (icon_button("snext", ic::right, ImVec2(P(30), P(30)), false, app.selected + 1 < n)) jump_scene(app, app.selected + 1);
         ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + P(38)));
     }
+    {
+        struct Tab {
+            uint32_t icon;
+            const char* tr;
+            const char* en;
+        };
+        const Tab tabs[] = {{ic::sliders, "Sahne", "Scene"},
+                            {ic::layers, "Katman", "Layers"},
+                            {ic::palette, "Renk", "Color"},
+                            {ic::music, "Ses", "Sound"}};
+        float gap = P(4), tw = (w - gap * 3) / 4.f, th = P(46);
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p - ImVec2(P(3), P(3)), p + ImVec2(w + P(3), th + P(3)), IM_COL32(6, 11, 16, 255), P(9));
+        for (int t = 0; t < 4; t++) {
+            ImVec2 q(p.x + t * (tw + gap), p.y);
+            ImGui::SetCursorScreenPos(q);
+            ImGui::PushID(900 + t);
+            bool hit = ImGui::InvisibleButton("etab", ImVec2(tw, th));
+            bool hov = ImGui::IsItemHovered();
+            ImGui::PopID();
+            bool on = app.edit_tab == t;
+            if (hit) app.edit_tab = t;
+            if (on) {
+                dl->AddRectFilled(q, q + ImVec2(tw, th), with_alpha(kAccent, 28), P(7));
+                dl->AddRect(q, q + ImVec2(tw, th), with_alpha(kAccent, 200), P(7), 0, P(1.2f));
+            } else if (hov) {
+                dl->AddRectFilled(q, q + ImVec2(tw, th), kRaised, P(7));
+            }
+            const char* is = I(tabs[t].icon);
+            ImVec2 isz = text_size(F.ui, is);
+            draw_text(dl, F.ui, ImVec2(q.x + (tw - isz.x) * 0.5f, q.y + P(5)), on ? kAccent : hov ? kText : kMuted, is);
+            const char* lab = tr(app.cfg, tabs[t].tr, tabs[t].en);
+            ImVec2 ls = text_size(F.tiny, lab);
+            draw_text(dl, F.tiny, ImVec2(q.x + (tw - ls.x) * 0.5f, q.y + th - ls.y - P(5)), on ? kText : kSoft, lab);
+            if (t == kTabLayers && !s.layers.empty()) {
+                std::string cnt = std::to_string(s.layers.size());
+                ImVec2 cs = text_size(F.tiny, cnt.c_str());
+                ImVec2 bp(q.x + tw - cs.x - P(10), q.y + P(4));
+                dl->AddRectFilled(bp - ImVec2(P(3), 0), bp + cs + ImVec2(P(3), 0), kAccent, P(6));
+                draw_text(dl, F.tiny, bp, kInk, cnt.c_str());
+            }
+        }
+        ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + th + P(12)));
+    }
+    if (app.edit_tab == kTabLayers) draw_layers_tab(app, s, w);
+    else if (app.edit_tab == kTabColor) draw_color_tab(app, s, w);
+    else if (app.edit_tab == kTabSound) draw_sound_tab(app, w);
+    else draw_scene_tab(app, s, w);
+}
+
+void draw_scene_tab(App& app, Scene& s, float w) {
     caption(tr(app.cfg, "Başlık", "Title"));
     push_field();
     ImGui::SetNextItemWidth(w);
@@ -2718,6 +3744,15 @@ void draw_scene_settings(App& app) {
     }
 
     divider(w);
+    section(tr(app.cfg, "Proje", "Project"));
+    float bw = (w - P(8)) * 0.5f;
+    if (button("psave", ic::save, tr(app.cfg, "Kaydet", "Save"), ImVec2(bw, P(36)), kOutline)) save_project(app, false);
+    ImGui::SameLine(0.f, P(8));
+    if (button("popen", ic::folder_open, tr(app.cfg, "Aç", "Open"), ImVec2(bw, P(36)), kOutline)) open_project(app);
+    if (!app.project_path.empty()) caption(fit(F.small, app.project_path, w).c_str());
+}
+
+void draw_sound_tab(App& app, float w) {
     section(tr(app.cfg, "Müzik", "Music"));
     ImGui::PushFont(F.small);
     {
@@ -2738,9 +3773,71 @@ void draw_scene_settings(App& app) {
     }
     ImGui::PopFont();
     {
-        bool silent = resolve_music(app.board) == "none";
+        ImGui::Dummy(ImVec2(0.f, P(2)));
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float h = P(40);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        bool own = !app.board.music_file.empty();
+        dl->AddRectFilled(p, p + ImVec2(w, h), own ? with_alpha(IM_COL32(150, 120, 255, 255), 26) : IM_COL32(6, 11, 16, 255), P(8));
+        dl->AddRect(p, p + ImVec2(w, h), own ? with_alpha(IM_COL32(150, 120, 255, 255), 150) : kLine, P(8));
+        draw_text(dl, F.ui, ImVec2(p.x + P(12), p.y + (h - F.ui->FontSize) * 0.5f), own ? IM_COL32(170, 150, 255, 255) : kMuted,
+                  I(ic::file_audio));
+        std::string label = own ? file_name_of(app.board.music_file)
+                                : std::string(tr(app.cfg, "Kendi müziğini yükle (MP3, WAV, M4A)", "Use your own music (MP3, WAV, M4A)"));
+        draw_text(dl, F.small, ImVec2(p.x + P(38), p.y + (h - F.small->FontSize) * 0.5f), own ? kText : kMuted,
+                  fit(F.small, label, w - P(48) - (own ? P(64) : 0.f)).c_str());
+        if (own) {
+            ImGui::SetCursorScreenPos(ImVec2(p.x + w - P(62), p.y + P(5)));
+            if (icon_button("mfc", ic::folder_open, ImVec2(P(28), P(30)), false, true, tr(app.cfg, "Değiştir", "Change"))) pick_music_file(app);
+            ImGui::SameLine(0.f, P(2));
+            if (icon_button("mfx", ic::x, ImVec2(P(28), P(30)), false, true, tr(app.cfg, "Kaldır", "Remove"))) {
+                app.board.music_file.clear();
+                touch(app);
+            }
+            ImGui::SetCursorScreenPos(p);
+            ImGui::Dummy(ImVec2(w, h));
+        } else {
+            ImGui::SetCursorScreenPos(p);
+            if (ImGui::InvisibleButton("mfadd", ImVec2(w, h))) pick_music_file(app);
+            if (ImGui::IsItemHovered()) dl->AddRect(p, p + ImVec2(w, h), with_alpha(kAccent, 150), P(8));
+        }
+        if (own) caption(tr(app.cfg, "Yüklenen parça hazır müziğin yerine çalar; kısaysa döngüye girer, sonda yumuşakça kısılır.",
+                            "Your track replaces the built-in music; it loops if short and fades out at the end."),
+                         w);
+    }
+    ImGui::Dummy(ImVec2(0.f, P(2)));
+    ImGui::PushFont(F.small);
+    {
+        float vw = w * 0.56f;
+        auto percent = [&](const char* id, const char* label, double& value) {
+            float v = static_cast<float>(value * 100.0);
+            row_label(label, w, vw);
+            push_field();
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(P(10), P(5)));
+            ImGui::SetNextItemWidth(vw);
+            if (ImGui::SliderFloat(id, &v, 0.f, 200.f, "%.0f%%")) {
+                value = v / 100.0;
+                touch(app);
+            }
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                value = 1.0;
+                touch(app);
+            }
+            ImGui::PopStyleVar();
+            pop_field();
+        };
+        percent("##mvol", tr(app.cfg, "Müzik seviyesi", "Music volume"), app.board.music_volume);
+        percent("##vvol", tr(app.cfg, "Ses seviyesi", "Voice volume"), app.board.voice_volume);
+    }
+    ImGui::PopFont();
+    {
+        bool silent = resolve_music(app.board) == "none" && app.board.music_file.empty();
         char info[96];
-        if (silent && has_narration(app.board))
+        bool own = !app.board.music_file.empty();
+        if (own)
+            std::snprintf(info, sizeof info, "%s", tr(app.cfg, "Kendi parçan çalıyor; seslendirme sırasında otomatik kısılır.",
+                                                      "Your track is playing; it ducks under the narration."));
+        else if (silent && has_narration(app.board))
             std::snprintf(info, sizeof info, "%s", tr(app.cfg, "Müzik yok, yalnızca seslendirme.", "No music, narration only."));
         else if (silent)
             std::snprintf(info, sizeof info, "%s", tr(app.cfg, "Bu video sessiz dışa aktarılır.", "This video exports without sound."));
@@ -2750,7 +3847,7 @@ void draw_scene_settings(App& app) {
         caption(info, w);
         ImGui::Dummy(ImVec2(0.f, P(2)));
         float bw2 = (w - P(8)) * 0.5f;
-        if (button("snap", ic::timer, tr(app.cfg, "Ritme oturt", "Snap to beat"), ImVec2(bw2, P(34)), kOutline, !silent)) {
+        if (button("snap", ic::timer, tr(app.cfg, "Ritme oturt", "Snap to beat"), ImVec2(bw2, P(34)), kOutline, !silent && !own)) {
             snap_to_beat(app.board, total_seconds(app.board));
             touch(app);
         }
@@ -2808,6 +3905,57 @@ void draw_scene_settings(App& app) {
             app.board.captions = kCaptionOpts[ci].id;
             touch(app);
         }
+        if (app.board.captions != "none") {
+            push_field();
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(P(10), P(5)));
+            float cs = static_cast<float>(app.board.caption_size * 100.0);
+            row_label(tr(app.cfg, "Alt yazı boyutu", "Caption size"), w, vw);
+            ImGui::SetNextItemWidth(vw);
+            if (ImGui::SliderFloat("##capsz", &cs, 50.f, 200.f, "%.0f%%")) {
+                app.board.caption_size = cs / 100.0;
+                touch(app);
+            }
+            bool autopos = app.board.caption_y <= 0;
+            float cy = autopos ? 0.f : static_cast<float>(app.board.caption_y * 100.0);
+            row_label(tr(app.cfg, "Dikey konum", "Vertical position"), w, vw);
+            ImGui::SetNextItemWidth(vw);
+            if (ImGui::SliderFloat("##capy", &cy, 0.f, 95.f, autopos ? tr(app.cfg, "Otomatik", "Auto") : "%.0f%%")) {
+                app.board.caption_y = cy < 8.f ? 0.0 : cy / 100.0;
+                touch(app);
+            }
+            ImGui::PopStyleVar();
+            pop_field();
+            unsigned char rgb[3] = {255, 216, 77};
+            parse_hex_color(app.board.caption_color, rgb);
+            float col[3] = {rgb[0] / 255.f, rgb[1] / 255.f, rgb[2] / 255.f};
+            row_label(tr(app.cfg, "Vurgu rengi", "Highlight colour"), w, vw);
+            if (ImGui::ColorEdit3("##capc", col, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) {
+                for (int c = 0; c < 3; c++) rgb[c] = static_cast<unsigned char>(std::clamp(col[c], 0.f, 1.f) * 255.f + 0.5f);
+                app.board.caption_color = hex_color(rgb);
+                touch(app);
+            }
+            const char* swatches[] = {"#ffd84d", "#28e2e8", "#ff4f8b", "#7cff6b", "#ffffff"};
+            for (const char* sw : swatches) {
+                ImGui::SameLine(0.f, P(6));
+                unsigned char c3[3];
+                parse_hex_color(sw, c3);
+                ImGui::PushID(sw);
+                ImVec2 sp = ImGui::GetCursorScreenPos();
+                if (ImGui::InvisibleButton("sw", ImVec2(P(20), P(20)))) {
+                    app.board.caption_color = sw;
+                    touch(app);
+                }
+                ImGui::GetWindowDrawList()->AddRectFilled(sp, sp + ImVec2(P(20), P(20)), IM_COL32(c3[0], c3[1], c3[2], 255), P(5));
+                if (app.board.caption_color == sw) ImGui::GetWindowDrawList()->AddRect(sp - ImVec2(P(2), P(2)), sp + ImVec2(P(22), P(22)), kText, P(6), 0, P(1.4f));
+                ImGui::PopID();
+            }
+            ImGui::PopFont();
+            if (toggle("capup", tr(app.cfg, "Kelime modunda BÜYÜK HARF", "UPPERCASE in word mode"), app.board.caption_upper, w)) {
+                app.board.caption_upper = !app.board.caption_upper;
+                touch(app);
+            }
+            ImGui::PushFont(F.small);
+        }
         ImGui::Dummy(ImVec2(0.f, P(2)));
         if (button("vfit", ic::timer, tr(app.cfg, "Süreleri sese uydur", "Fit scenes to the voice"), ImVec2(w, P(34)), kOutline,
                    on && has_narration(app.board))) {
@@ -2828,14 +3976,6 @@ void draw_scene_settings(App& app) {
         ImGui::InputTextMultiline("##credits", &app.board.credits, ImVec2(w, P(90)), ImGuiInputTextFlags_ReadOnly);
         pop_field();
     }
-
-    divider(w);
-    section(tr(app.cfg, "Proje", "Project"));
-    float bw = (w - P(8)) * 0.5f;
-    if (button("psave", ic::save, tr(app.cfg, "Kaydet", "Save"), ImVec2(bw, P(36)), kOutline)) save_project(app, false);
-    ImGui::SameLine(0.f, P(8));
-    if (button("popen", ic::folder_open, tr(app.cfg, "Aç", "Open"), ImVec2(bw, P(36)), kOutline)) open_project(app);
-    if (!app.project_path.empty()) caption(fit(F.small, app.project_path, w).c_str());
 }
 
 void draw_right(App& app, ImVec2 a, ImVec2 b) {
@@ -2916,12 +4056,14 @@ void draw_timeline(App& app, ImVec2 a, ImVec2 b) {
     float top = a.y + pad + tb + P(8);
     float hc = P(132);
     float ruler_h = P(24), gap = P(6);
-    float lanes_h = b.y - pad - top - ruler_h - gap * 3 - P(14);
-    float video_h = std::max(P(40), lanes_h * 0.52f);
-    float sub_h = std::max(P(24), lanes_h * 0.2f);
-    float music_h = std::max(P(26), lanes_h - video_h - sub_h);
+    float lanes_h = b.y - pad - top - ruler_h - gap * 4 - P(14);
+    float video_h = std::max(P(40), lanes_h * 0.43f);
+    float layer_h = std::max(P(24), lanes_h * 0.2f);
+    float sub_h = std::max(P(22), lanes_h * 0.15f);
+    float music_h = std::max(P(24), lanes_h - video_h - layer_h - sub_h);
     float y_video = top + ruler_h + gap;
-    float y_sub = y_video + video_h + gap;
+    float y_layer = y_video + video_h + gap;
+    float y_sub = y_layer + layer_h + gap;
     float y_music = y_sub + sub_h + gap;
     struct Head {
         uint32_t icon;
@@ -2931,9 +4073,10 @@ void draw_timeline(App& app, ImVec2 a, ImVec2 b) {
         float h;
     };
     const Head heads[] = {{ic::video, "Video 1", "Video 1", y_video, video_h},
+                          {ic::layers, "Katmanlar", "Layers", y_layer, layer_h},
                           {ic::captions, "Altyazı", "Captions", y_sub, sub_h},
                           {ic::music, "Müzik", "Music", y_music, music_h}};
-    for (int k = 0; k < 3; k++) {
+    for (int k = 0; k < 4; k++) {
         const Head& h = heads[k];
         ImVec2 ha(a.x + pad, h.y), hb2(a.x + pad + hc - P(8), h.y + h.h);
         g_root->AddRectFilled(ha, hb2, kPanel2, P(6));
@@ -2942,7 +4085,13 @@ void draw_timeline(App& app, ImVec2 a, ImVec2 b) {
         float cy = h.y + h.h * 0.5f;
         draw_text(g_root, F.ui, ImVec2(ha.x + P(10), cy - F.ui->FontSize * 0.5f), kMuted, is);
         draw_text(g_root, F.small, ImVec2(ha.x + P(34), cy - F.small->FontSize * 0.5f), kSoft, tr(app.cfg, h.tr, h.en));
-        if (k == 2 && hb) {
+        if (k == 1 && hb) {
+            ImGui::SetCursorScreenPos(ImVec2(hb2.x - P(28), cy - P(12)));
+            if (icon_button("lane_addt", ic::plus, ImVec2(P(24), P(24)), false, true,
+                            tr(app.cfg, "Bu sahneye yazı katmanı ekle (T)", "Add a text layer to this scene (T)")))
+                layer_add(app, "text");
+        }
+        if (k == 3 && hb) {
             ImGui::SetCursorScreenPos(ImVec2(hb2.x - P(28), cy - P(12)));
             if (icon_button("lane_mute", app.mute ? ic::mute : ic::volume, ImVec2(P(24), P(24)), app.mute, true,
                             app.mute ? tr(app.cfg, "Sesi aç", "Unmute") : tr(app.cfg, "Sessize al", "Mute")))
@@ -2967,7 +4116,7 @@ void draw_timeline(App& app, ImVec2 a, ImVec2 b) {
     float pps = app.frozen_pps > 0 ? app.frozen_pps : fit_pps * app.tl_zoom;
     float content_w = std::max(view_w, static_cast<float>(total) * pps + P(20));
     ImVec2 o = ImGui::GetCursorScreenPos();
-    float vy = o.y + ruler_h + gap, sy = vy + video_h + gap, my = sy + sub_h + gap;
+    float vy = o.y + ruler_h + gap, ly = vy + video_h + gap, sy = ly + layer_h + gap, my = sy + sub_h + gap;
 
     if (ImGui::IsWindowHovered()) {
         ImGuiIO& io = ImGui::GetIO();
@@ -3008,6 +4157,7 @@ void draw_timeline(App& app, ImVec2 a, ImVec2 b) {
         }
     }
     dl->AddRectFilled(ImVec2(o.x, vy), ImVec2(o.x + content_w, vy + video_h), IM_COL32(7, 12, 17, 255), P(6));
+    dl->AddRectFilled(ImVec2(o.x, ly), ImVec2(o.x + content_w, ly + layer_h), IM_COL32(7, 12, 17, 255), P(6));
     dl->AddRectFilled(ImVec2(o.x, sy), ImVec2(o.x + content_w, sy + sub_h), IM_COL32(7, 12, 17, 255), P(6));
     dl->AddRectFilled(ImVec2(o.x, my), ImVec2(o.x + content_w, my + music_h), IM_COL32(7, 12, 17, 255), P(6));
 
@@ -3021,6 +4171,7 @@ void draw_timeline(App& app, ImVec2 a, ImVec2 b) {
         bool any_edge = false;
         int n = static_cast<int>(app.board.scenes.size());
         int open_scene_menu = -1, open_trans_menu = -1, hot_trans = -1;
+        bool open_layer_menu = false;
         {
             double at = 0;
             for (int i = 0; i < n; i++) {
@@ -3063,6 +4214,10 @@ void draw_timeline(App& app, ImVec2 a, ImVec2 b) {
                 open_scene_menu = i;
             }
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) app.page = kEdit;
+            if (ImGui::IsItemActive() && n > 1 && ImGui::IsMouseDragging(ImGuiMouseButton_Left, P(10))) {
+                app.tl_drag_scene = i;
+                app.tl_reordering = true;
+            }
             bool hot = ImGui::IsItemHovered();
             ImGui::SetCursorScreenPos(ImVec2(ca.x + body, ca.y));
             ImGui::InvisibleButton("edge", ImVec2(edge, video_h));
@@ -3143,10 +4298,127 @@ void draw_timeline(App& app, ImVec2 a, ImVec2 b) {
             draw_text(dl, F.tiny, ImVec2(sa.x + P(8), (sa.y + sb2.y - F.tiny->FontSize) * 0.5f), sel ? kText : kSoft,
                       fit(F.tiny, cap, sb2.x - sa.x - P(14)).c_str());
             dl->PopClipRect();
+
+            int nl = static_cast<int>(s.layers.size());
+            int rows = std::max(1, std::min(nl, 3));
+            float rhh = (layer_h - P(4)) / static_cast<float>(rows);
+            for (int li = 0; li < nl; li++) {
+                Layer& L = s.layers[static_cast<size_t>(li)];
+                double ls = std::min(L.start, s.seconds - 0.05);
+                double le = L.end > L.start ? std::min(L.end, s.seconds) : s.seconds;
+                float bx0 = o.x + static_cast<float>(acc + ls) * pps + P(1), bx1 = o.x + static_cast<float>(acc + le) * pps - P(1);
+                if (bx1 - bx0 < P(4)) bx1 = bx0 + P(4);
+                int row = (nl - 1 - li) % rows;
+                float by0 = ly + P(2) + row * rhh, by1 = by0 + rhh - P(2);
+                ImGui::PushID(5000 + li);
+                float ew = std::min(P(6), (bx1 - bx0) * 0.25f);
+                const char* ids[3] = {"lbs", "lbb", "lbe"};
+                float xs[3] = {bx0, bx0 + ew, bx1 - ew};
+                float ws[3] = {ew, std::max(1.f, bx1 - bx0 - ew * 2), ew};
+                bool lhot = false;
+                for (int part = 0; part < 3; part++) {
+                    int mode = part == 0 ? 2 : part == 1 ? 1 : 3;
+                    ImGui::SetCursorScreenPos(ImVec2(xs[part], by0));
+                    ImGui::InvisibleButton(ids[part], ImVec2(ws[part], std::max(1.f, by1 - by0)));
+                    if (ImGui::IsItemHovered()) lhot = true;
+                    if (part != 1 && (ImGui::IsItemHovered() || ImGui::IsItemActive())) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                        app.selected = i;
+                        select_layer(app, li);
+                        open_layer_menu = true;
+                    }
+                    if (ImGui::IsItemActivated()) {
+                        app.selected = i;
+                        app.playing = false;
+                        select_layer(app, li);
+                        app.tl_layer_drag = mode;
+                        app.tl_layer_scene = i;
+                        app.tl_layer_index = li;
+                        app.tl_drag_t0 = (ImGui::GetIO().MousePos.x - o.x) / pps;
+                        app.tl_drag_start = ls;
+                        app.tl_drag_end = le;
+                        app.frozen_pps = pps;
+                        app.play_t = static_cast<float>(acc + std::min(le - 0.02, ls + 0.4));
+                    }
+                    if (ImGui::IsItemActive() && app.tl_layer_drag == mode && app.tl_layer_scene == i && app.tl_layer_index == li) {
+                        any_edge = true;
+                        double dt = (ImGui::GetIO().MousePos.x - o.x) / pps - app.tl_drag_t0;
+                        double dur = app.tl_drag_end - app.tl_drag_start;
+                        double sec = s.seconds;
+                        if (mode == 1) {
+                            double ns = std::clamp(app.tl_drag_start + dt, 0.0, std::max(0.0, sec - dur));
+                            L.start = ns;
+                            L.end = ns + dur >= sec - 0.02 ? 0.0 : ns + dur;
+                            app.play_t = static_cast<float>(acc + std::min(sec - 0.02, ns + 0.4));
+                        } else if (mode == 2) {
+                            L.start = std::clamp(app.tl_drag_start + dt, 0.0, app.tl_drag_end - 0.1);
+                            if (L.end <= 0 && app.tl_drag_end < sec - 0.02) L.end = app.tl_drag_end;
+                            app.play_t = static_cast<float>(acc + std::min(sec - 0.02, L.start + 0.4));
+                        } else {
+                            double e = std::clamp(app.tl_drag_end + dt, app.tl_drag_start + 0.1, sec);
+                            L.end = e >= sec - 0.02 ? 0.0 : e;
+                            app.play_t = static_cast<float>(acc + std::max(0.0, e - 0.05));
+                        }
+                        touch(app);
+                    }
+                    if (ImGui::IsItemDeactivated()) app.tl_layer_drag = 0;
+                }
+                bool lsel = sel && app.layer_scene == i && app.sel_layer == li;
+                ImU32 lc = L.kind == "image" ? IM_COL32(150, 120, 255, 255) : L.kind == "box" ? kWarm : kAccent;
+                ImVec2 la2(bx0, by0), lb2(bx1, by1);
+                dl->AddRectFilled(la2, lb2, with_alpha(lc, lsel ? 120 : lhot ? 80 : 50), P(4));
+                dl->AddRect(la2, lb2, with_alpha(lc, lsel ? 255 : 150), P(4), 0, lsel ? P(1.5f) : 1.f);
+                if (bx1 - bx0 > P(18)) {
+                    uint32_t li_icon = L.kind == "image" ? ic::image : L.kind == "box" ? ic::box : ic::type;
+                    std::string lab = std::string(I(li_icon)) + " " + layer_name(app, L);
+                    dl->PushClipRect(la2, lb2, true);
+                    draw_text(dl, F.tiny, ImVec2(bx0 + P(5), (by0 + by1 - F.tiny->FontSize) * 0.5f), lsel ? kText : kSoft,
+                              fit(F.tiny, lab, bx1 - bx0 - P(10)).c_str());
+                    dl->PopClipRect();
+                }
+                ImGui::PopID();
+            }
             ImGui::PopID();
             acc += s.seconds;
         }
         if (!any_edge) app.frozen_pps = 0.f;
+        if (app.tl_reordering) {
+            int from = app.tl_drag_scene;
+            float mx = ImGui::GetIO().MousePos.x;
+            double at2 = 0;
+            int ins = n;
+            for (int j = 0; j < n; j++) {
+                double sj = app.board.scenes[static_cast<size_t>(j)].seconds;
+                if (mx < o.x + static_cast<float>(at2 + sj * 0.5) * pps) {
+                    ins = j;
+                    break;
+                }
+                at2 += sj;
+            }
+            int to = ins > from ? ins - 1 : ins;
+            double bt = ins >= n ? total_seconds(app.board) : scene_start(app.board, ins);
+            float bxl = o.x + static_cast<float>(bt) * pps;
+            if (to != from) {
+                dl->AddRectFilled(ImVec2(bxl - P(2), vy - P(4)), ImVec2(bxl + P(2), vy + video_h + P(4)), kAccent, P(2));
+                glow(dl, ImVec2(bxl - P(2), vy), ImVec2(bxl + P(2), vy + video_h), P(2), kAccent, 1.f);
+            }
+            if (from >= 0 && from < n) {
+                const Scene& fs = app.board.scenes[static_cast<size_t>(from)];
+                std::string lab = std::to_string(from + 1) + "  " + (fs.title.empty() ? fs.text : fs.title);
+                lab = fit(F.small, lab, P(200));
+                ImVec2 ts = text_size(F.small, lab.c_str());
+                ImVec2 gp(mx + P(12), vy + P(6));
+                ImGui::GetForegroundDrawList()->AddRectFilled(gp, gp + ts + ImVec2(P(16), P(10)), with_alpha(kPanel2, 235), P(6));
+                ImGui::GetForegroundDrawList()->AddRect(gp, gp + ts + ImVec2(P(16), P(10)), kAccent, P(6));
+                ImGui::GetForegroundDrawList()->AddText(F.small, F.small->FontSize, gp + ImVec2(P(8), P(5)), kText, lab.c_str());
+            }
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                if (to != from) scene_move(app, from, to);
+                app.tl_reordering = false;
+                app.tl_drag_scene = -1;
+            }
+        }
 
         {
             float lane_w = static_cast<float>(total) * pps;
@@ -3161,12 +4433,13 @@ void draw_timeline(App& app, ImVec2 a, ImVec2 b) {
             }
             open_menu_on_right_click("music_menu");
             std::string mood = resolve_music(app.board);
-            bool silent = mood == "none";
+            bool own = !app.board.music_file.empty();
+            bool silent = mood == "none" && !own;
             bool fresh = app.track_serial == app.serial && !app.peaks.empty();
             ImU32 lane_col = silent ? kDim : IM_COL32(150, 120, 255, 255);
             dl->AddRectFilled(ma, mb, with_alpha(lane_col, silent ? 10 : mhot ? 30 : 20), P(5));
             dl->AddRect(ma, mb, with_alpha(lane_col, silent ? 40 : 90), P(5));
-            if (!silent) {
+            if (!silent && !own) {
                 double beat = beat_seconds(app.board);
                 for (int k = 0; beat > 0.05 && k * beat * 4 < total; k++) {
                     float bx = o.x + static_cast<float>(k * beat * 4) * pps;
@@ -3186,11 +4459,17 @@ void draw_timeline(App& app, ImVec2 a, ImVec2 b) {
                     dl->AddLine(ImVec2(x, cy - v * amp), ImVec2(x, cy + v * amp), c, P(1.2f));
                 }
             }
-            std::string label = std::string(I(ic::music)) + "  " + opt_label(app.cfg, kMusicOpts, mood);
+            std::string label = std::string(I(own ? ic::file_audio : ic::music)) + "  " +
+                                (own ? file_name_of(app.board.music_file) : opt_label(app.cfg, kMusicOpts, mood));
             if (!silent) {
                 char bpm[24];
                 std::snprintf(bpm, sizeof bpm, "  \xC2\xB7  %.0f BPM", 60.0 / beat_seconds(app.board));
-                label += bpm;
+                if (!own) label += bpm;
+                if (app.board.music_volume != 1.0) {
+                    char vol[24];
+                    std::snprintf(vol, sizeof vol, "  \xC2\xB7  %%%.0f", app.board.music_volume * 100.0);
+                    label += vol;
+                }
                 if (!fresh) label += tr(app.cfg, "  \xC2\xB7  hazırlanıyor...", "  \xC2\xB7  preparing...");
                 if (app.mute) label += tr(app.cfg, "  \xC2\xB7  sessiz", "  \xC2\xB7  muted");
             }
@@ -3213,6 +4492,11 @@ void draw_timeline(App& app, ImVec2 a, ImVec2 b) {
             ImGui::OpenPopup("lane_menu");
         if (menu_begin("clip_menu")) {
             scene_menu(app, app.ctx_scene);
+            menu_end();
+        }
+        if (open_layer_menu) ImGui::OpenPopup("tl_layer_menu");
+        if (menu_begin("tl_layer_menu")) {
+            layer_menu_items(app);
             menu_end();
         }
         if (menu_begin("trans_menu")) {
@@ -3803,13 +5087,38 @@ void shortcuts(App& app) {
     if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S)) save_project(app, false);
     if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O)) open_project(app);
     if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_E)) ask_export(app);
-    if (app.has_board && ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) jump_scene(app, app.selected - 1);
-    if (app.has_board && ImGui::IsKeyPressed(ImGuiKey_RightArrow)) jump_scene(app, app.selected + 1);
+    Layer* layer = app.playing ? nullptr : edit_layer(app);
+    if (layer) {
+        float step = io.KeyShift ? 0.02f : 0.002f;
+        float dx = (ImGui::IsKeyPressed(ImGuiKey_RightArrow) ? step : 0.f) - (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) ? step : 0.f);
+        float dy = (ImGui::IsKeyPressed(ImGuiKey_DownArrow) ? step : 0.f) - (ImGui::IsKeyPressed(ImGuiKey_UpArrow) ? step : 0.f);
+        if (dx != 0.f || dy != 0.f) {
+            layer->x += dx;
+            layer->y += dy;
+            normalize_layer(*layer);
+            touch(app);
+        }
+    } else {
+        if (app.has_board && ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) jump_scene(app, app.selected - 1);
+        if (app.has_board && ImGui::IsKeyPressed(ImGuiKey_RightArrow)) jump_scene(app, app.selected + 1);
+    }
     if (ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) return;
     if (ImGui::IsKeyPressed(ImGuiKey_M, false)) app.mute = !app.mute;
     if (!app.has_board) return;
-    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_D)) scene_duplicate(app, app.selected);
-    if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) scene_delete(app, app.selected);
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        app.sel_layer = -1;
+        app.pick_focus = false;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_T, false) && !io.KeyCtrl) layer_add(app, "text");
+    if (layer) {
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_D)) layer_duplicate(app, app.sel_layer);
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_C)) layer_copy(app);
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) layer_delete(app, app.sel_layer);
+    } else {
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_D)) scene_duplicate(app, app.selected);
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) scene_delete(app, app.selected);
+    }
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_V) && app.has_clip_layer) layer_paste(app);
     if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !io.KeyCtrl) split_at_playhead(app);
 }
 
@@ -4104,13 +5413,19 @@ void run_app(const Launch& launch) {
             io.DisplaySize = ImVec2(static_cast<float>(launch.width), static_cast<float>(launch.height));
             io.DisplayFramebufferScale = ImVec2(1.f, 1.f);
             int k = frame - settle_frames;
-            if (k >= 0 && k % input_gap == 0 && k / input_gap < static_cast<int>(launch.inputs.size())) {
-                const ShotInput& in = launch.inputs[static_cast<size_t>(k / input_gap)];
-                io.AddMousePosEvent(in.x, in.y);
-                if (in.button >= 0) io.AddMouseButtonEvent(in.button, true);
-            } else if (k > 0 && k % input_gap == 1 && (k - 1) / input_gap < static_cast<int>(launch.inputs.size())) {
-                const ShotInput& in = launch.inputs[static_cast<size_t>((k - 1) / input_gap)];
-                if (in.button >= 0) io.AddMouseButtonEvent(in.button, false);
+            int slot = k >= 0 ? k / input_gap : -1, step = k >= 0 ? k % input_gap : 0;
+            if (slot >= 0 && slot < static_cast<int>(launch.inputs.size())) {
+                const ShotInput& in = launch.inputs[static_cast<size_t>(slot)];
+                int release = in.drag ? input_gap - 1 : 1;
+                if (step == 0) {
+                    io.AddMousePosEvent(in.x, in.y);
+                    if (in.button >= 0) io.AddMouseButtonEvent(in.button, true);
+                } else if (in.drag && step < release) {
+                    float t = static_cast<float>(step) / static_cast<float>(release - 1);
+                    io.AddMousePosEvent(in.x + (in.x2 - in.x) * t, in.y + (in.y2 - in.y) * t);
+                } else if (step == release && in.button >= 0) {
+                    io.AddMouseButtonEvent(in.button, false);
+                }
             }
         }
         ImGui::NewFrame();

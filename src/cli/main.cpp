@@ -317,6 +317,93 @@ int selftest() {
         expect(!voiced.empty() && loud > 100, "narration in soundtrack");
         expect(std::abs(doc.scenes[0].seconds - (kare::kVoiceLead + clip->seconds)) < 3.0, "scene fits voice");
     }
+
+    {
+        kare::Storyboard ed;
+        ed.width = 320;
+        ed.height = 180;
+        ed.mark = false;
+        ed.grain = false;
+        ed.music = "none";
+        kare::Scene sc;
+        sc.title = "Elle";
+        sc.seconds = 3;
+        kare::Layer box;
+        box.kind = "box";
+        box.x = 0.5;
+        box.y = 0.5;
+        box.w = 0.3;
+        box.h = 0.3;
+        box.fill = "#ff0000";
+        box.in = "none";
+        box.shadow = false;
+        sc.layers.push_back(box);
+        kare::Layer text;
+        text.text = "*Merhaba*";
+        text.x = 0.2;
+        text.y = 0.3;
+        text.start = 1.0;
+        text.end = 2.0;
+        sc.layers.push_back(text);
+        ed.scenes.push_back(sc);
+        kare::normalize(ed);
+        kare::Frame lf;
+        kare::render_frame(ed, 1.5, lf);
+        const uint8_t* mid = &lf.rgba[(static_cast<size_t>(90) * 320 + 160) * 4];
+        expect(mid[0] > 200 && mid[1] < 60 && mid[2] < 60, "box layer drawn");
+        float cx = 0, cy = 0, w = 0, h = 0;
+        expect(kare::layer_box(ed, 0, 0, cx, cy, w, h) && std::abs(cx - 160) < 1 && std::abs(w - 96) < 1 && std::abs(h - 54) < 1,
+               "layer box geometry");
+        expect(kare::layer_visible(ed, 0, 1, 1.5) && !kare::layer_visible(ed, 0, 1, 2.5), "layer timing");
+
+        ed.scenes[0].look.filter = "bw";
+        kare::render_frame(ed, 1.5, lf);
+        const uint8_t* bg = &lf.rgba[(static_cast<size_t>(8) * 320 + 8) * 4];
+        mid = &lf.rgba[(static_cast<size_t>(90) * 320 + 160) * 4];
+        expect(std::abs(bg[0] - bg[1]) < 4 && std::abs(bg[1] - bg[2]) < 4 && mid[0] > 200 && mid[1] < 60,
+               "bw look grades the scene, not the layers");
+
+        ed.scenes[0].camera = "left";
+        ed.scenes[0].layers[0].rotation = 30;
+        ed.music_volume = 0.5;
+        ed.caption_color = "#00FF00";
+        ed.caption_upper = false;
+        std::string dumped_ed = kare::story_to_json(ed);
+        kare::Storyboard back;
+        expect(kare::story_from_json(dumped_ed, back, err) && back.scenes.size() == 1 && back.scenes[0].layers.size() == 2 &&
+                   back.scenes[0].layers[0].kind == "box" && back.scenes[0].layers[0].rotation == 30 &&
+                   back.scenes[0].layers[1].text == "*Merhaba*" && back.scenes[0].layers[1].end == 2.0 &&
+                   back.scenes[0].look.filter == "bw" && back.scenes[0].camera == "left" && back.music_volume == 0.5 &&
+                   back.caption_color == "#00ff00" && !back.caption_upper,
+               "edit json roundtrip");
+
+        kare::Layer junk;
+        junk.kind = "laser";
+        junk.x = 9;
+        junk.color = "mavi";
+        junk.in = "boom";
+        kare::normalize_layer(junk);
+        expect(junk.kind == "text" && junk.x == 1.5 && junk.color == "#ffffff" && junk.in == "fade", "layer normalize");
+
+        std::vector<int16_t> tone(static_cast<size_t>(kare::kAudioRate) * 2);
+        for (size_t k = 0; k < tone.size() / 2; k++) {
+            int16_t v = static_cast<int16_t>(std::sin(k * 2.0 * 3.14159265 * 440.0 / kare::kAudioRate) * 12000);
+            tone[k * 2] = tone[k * 2 + 1] = v;
+        }
+        std::string wav = temp_path("kare_selftest_music.wav");
+        auto bytes = kare::wav_bytes(tone);
+        kare::write_bytes(wav, bytes.data(), bytes.size());
+        ed.music_file = wav;
+        ed.music_volume = 1.0;
+        auto own = kare::render_soundtrack(ed);
+        int loud = 0;
+        for (size_t k = static_cast<size_t>(kare::kAudioRate) * 2; k < static_cast<size_t>(kare::kAudioRate) * 4 && k < own.size(); k++)
+            if (own[k] > 6000 || own[k] < -6000) loud++;
+        expect(own.size() == static_cast<size_t>(3 * kare::kAudioRate) * 2 && loud > 1000, "own music file loops");
+#ifdef _WIN32
+        _wremove(kare::widen(wav).c_str());
+#endif
+    }
 #ifdef _WIN32
     _wremove(kare::widen(shot.image).c_str());
 #endif
