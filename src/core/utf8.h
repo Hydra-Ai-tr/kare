@@ -18,6 +18,7 @@ uint32_t fold_cp(uint32_t cp);
 std::string fold_tr(const std::string& s);
 
 std::string tidy(std::string s);
+std::string tidy_lines(const std::string& s);
 std::wstring widen(const std::string& utf8);
 std::string narrow(const std::wstring& w);
 

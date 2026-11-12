@@ -119,8 +119,39 @@ std::string tidy(std::string s) {
         out.push_back(cp);
     }
     while (!out.empty() && (is_edge_punct(out.front()) || out.front() == ' ')) out.erase(out.begin());
-    while (!out.empty() && (is_edge_punct(out.back()) || out.back() == ' ')) out.pop_back();
+    while (!out.empty() && out.back() != '!' && out.back() != '?' && out.back() != 0x2026 &&
+           (is_edge_punct(out.back()) || out.back() == ' '))
+        out.pop_back();
     return cps_utf8(out);
+}
+
+std::string tidy_lines(const std::string& s) {
+    if (s.find('\n') == std::string::npos) return tidy(s);
+    std::string out;
+    std::vector<uint32_t> line;
+    auto flush = [&] {
+        std::vector<uint32_t> clean;
+        bool space = false;
+        for (uint32_t cp : line) {
+            if (is_space_cp(cp)) {
+                space = !clean.empty();
+                continue;
+            }
+            if (space) clean.push_back(' ');
+            space = false;
+            clean.push_back(cp);
+        }
+        line.clear();
+        if (clean.empty()) return;
+        if (!out.empty()) out.push_back('\n');
+        out += cps_utf8(clean);
+    };
+    for (uint32_t cp : utf8_cps(s)) {
+        if (cp == '\n') flush();
+        else if (cp != '\r') line.push_back(cp);
+    }
+    flush();
+    return out;
 }
 
 std::wstring widen(const std::string& utf8) {

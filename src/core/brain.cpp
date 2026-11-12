@@ -1,126 +1,21 @@
 #include "core/brain.h"
 
+#include "core/http.h"
 #include "core/json.h"
 #include "core/story.h"
 #include "core/utf8.h"
-
-#ifndef _WIN32
-
-namespace kare {
-
-bool plan_with_api(const PlanInput&, Storyboard&, std::string& err) {
-    err = "API planning is available on Windows in this version";
-    return false;
-}
-
-}  // namespace kare
-
-#else
-
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <winhttp.h>
-
-#include <vector>
 
 namespace kare {
 
 namespace {
 
-struct HttpResult {
-    int status = 0;
-    std::string body;
-    std::string error;
-};
-
-std::wstring trim_slash_copy(std::wstring s) {
-    while (!s.empty() && (s.back() == L'/' || s.back() == L' ')) s.pop_back();
-    return s;
-}
-
-HttpResult http_post(const std::string& url, const std::string& body, const std::wstring& headers, int timeout_ms) {
-    HttpResult r;
-    HINTERNET ses = WinHttpOpen(L"Kare/0.1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
-                                WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!ses) {
-        r.error = "WinHttpOpen failed";
-        return r;
-    }
-    std::wstring wurl = widen(url);
-    URL_COMPONENTS uc{};
-    uc.dwStructSize = sizeof uc;
-    wchar_t host[300]{};
-    wchar_t path[4096]{};
-    wchar_t extra[2048]{};
-    uc.lpszHostName = host;
-    uc.dwHostNameLength = 300;
-    uc.lpszUrlPath = path;
-    uc.dwUrlPathLength = 4096;
-    uc.lpszExtraInfo = extra;
-    uc.dwExtraInfoLength = 2048;
-    if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc)) {
-        r.error = "bad URL";
-        WinHttpCloseHandle(ses);
-        return r;
-    }
-    bool https = uc.nScheme == INTERNET_SCHEME_HTTPS;
-    HINTERNET con = WinHttpConnect(ses, host, uc.nPort, 0);
-    if (!con) {
-        r.error = "could not connect";
-        WinHttpCloseHandle(ses);
-        return r;
-    }
-    std::wstring full = std::wstring(path, uc.dwUrlPathLength) + std::wstring(extra, uc.dwExtraInfoLength);
-    HINTERNET req = WinHttpOpenRequest(con, L"POST", full.c_str(), nullptr, WINHTTP_NO_REFERER,
-                                       WINHTTP_DEFAULT_ACCEPT_TYPES, https ? WINHTTP_FLAG_SECURE : 0);
-    if (!req) {
-        r.error = "could not open request";
-        WinHttpCloseHandle(con);
-        WinHttpCloseHandle(ses);
-        return r;
-    }
-    WinHttpSetTimeouts(req, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
-    BOOL ok = WinHttpSendRequest(req, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
-                                 headers.empty() ? 0 : (DWORD)-1L, (LPVOID)body.data(), (DWORD)body.size(),
-                                 (DWORD)body.size(), 0);
-    if (!ok || !WinHttpReceiveResponse(req, nullptr)) {
-        r.error = "request failed";
-        WinHttpCloseHandle(req);
-        WinHttpCloseHandle(con);
-        WinHttpCloseHandle(ses);
-        return r;
-    }
-    DWORD status = 0;
-    DWORD slen = sizeof status;
-    WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
-                        &status, &slen, WINHTTP_NO_HEADER_INDEX);
-    r.status = static_cast<int>(status);
-    for (;;) {
-        DWORD avail = 0;
-        if (!WinHttpQueryDataAvailable(req, &avail)) break;
-        if (!avail) break;
-        if (r.body.size() > 1024 * 1024) {
-            r.error = "response too large";
-            break;
-        }
-        std::vector<char> buf(avail);
-        DWORD read = 0;
-        if (!WinHttpReadData(req, buf.data(), avail, &read)) break;
-        r.body.append(buf.data(), buf.data() + read);
-    }
-    WinHttpCloseHandle(req);
-    WinHttpCloseHandle(con);
-    WinHttpCloseHandle(ses);
-    return r;
+std::string trim_base(std::string base) {
+    while (!base.empty() && (base.back() == '/' || base.back() == ' ')) base.pop_back();
+    return base;
 }
 
 std::string endpoint_for(std::string base) {
-    while (!base.empty() && (base.back() == '/' || base.back() == ' ')) base.pop_back();
+    base = trim_base(base);
     const std::string tail = "/chat/completions";
     if (base.size() >= tail.size() && base.compare(base.size() - tail.size(), tail.size(), tail) == 0) return base;
     return base + tail;
@@ -131,6 +26,12 @@ std::string extract_object(const std::string& text) {
     auto b = text.rfind('}');
     if (a == std::string::npos || b == std::string::npos || b <= a) return {};
     return text.substr(a, b - a + 1);
+}
+
+std::string auth_headers(const std::string& key) {
+    std::string h = "Content-Type: application/json\r\n";
+    if (!key.empty()) h += "Authorization: Bearer " + key + "\r\n";
+    return h;
 }
 
 }  // namespace
@@ -148,10 +49,18 @@ bool plan_with_api(const PlanInput& in, Storyboard& board, std::string& err) {
         "You are the director of a local video studio. Convert the user prompt into a storyboard. "
         "Reply with JSON only, no markdown. Schema: "
         "{\"title\":\"string\",\"style\":\"ember|dusk|night|sea|forest|neon|paper|minimal\","
-        "\"aspect\":\"16:9|9:16|1:1\",\"scenes\":[{\"title\":\"string\",\"text\":\"string\","
-        "\"seconds\":2.5,\"motion\":\"drift|zoom|rise\"}]} "
-        "Use 1 to 8 scenes, each between 1 and 12 seconds. On-screen title and text must be in the "
-        "user's language, short enough to read on a frame. style and motion must be one of the listed values.";
+        "\"aspect\":\"16:9|9:16|1:1\",\"music\":\"auto|ambient|pulse|drive|lofi|none\","
+        "\"scenes\":[{\"title\":\"string\",\"text\":\"string\",\"kicker\":\"string\",\"seconds\":2.5,"
+        "\"layout\":\"auto|hero|statement|list|stat|quote|split|terminal|bars|end\","
+        "\"transition\":\"auto|fade|slide|wipe|zoom|flash|glitch|cut\","
+        "\"anim\":\"auto|rise|fade|type|reveal|spring\",\"motion\":\"drift|zoom|rise|pan|still\"}]} "
+        "Edit like a professional motion designer: open with a hero scene, vary layouts, end with an end card. "
+        "Layout rules: list = text with one item per line (\\n); bars = lines like \"Label 72%\"; "
+        "terminal = shell commands one per line; stat = title is a number such as 98% or 1.2k with a short text; "
+        "quote = text is a quotation; end = call to action, title is a URL or handle. "
+        "kicker is an optional 1-3 word label shown above the title. Wrap one key word of a title in *asterisks* "
+        "to highlight it. Use 3 to 10 scenes, each between 1.5 and 8 seconds. On-screen text must be in the "
+        "user's language and short enough to read on a frame. Every enum field must be one of the listed values.";
     std::string user = in.prompt;
     if (in.seconds > 0) user += "\nTarget duration seconds: " + std::to_string(static_cast<int>(in.seconds));
     if (!in.aspect.empty()) user += "\nAspect: " + in.aspect;
@@ -159,9 +68,7 @@ bool plan_with_api(const PlanInput& in, Storyboard& board, std::string& err) {
     std::string payload = std::string("{\"model\":\"") + json_escape(in.api_model) +
                           "\",\"temperature\":0.4,\"messages\":[{\"role\":\"system\",\"content\":\"" +
                           json_escape(system) + "\"},{\"role\":\"user\",\"content\":\"" + json_escape(user) + "\"}]}";
-    std::wstring headers = L"Content-Type: application/json\r\n";
-    if (!in.api_key.empty()) headers += L"Authorization: Bearer " + widen(in.api_key) + L"\r\n";
-    HttpResult res = http_post(endpoint_for(in.api_base), payload, headers, 90000);
+    HttpResult res = http_request("POST", endpoint_for(in.api_base), payload, auth_headers(in.api_key), 90000);
     if (!res.error.empty() && res.body.empty()) {
         err = res.error;
         return false;
@@ -196,6 +103,29 @@ bool plan_with_api(const PlanInput& in, Storyboard& board, std::string& err) {
     return true;
 }
 
-}  // namespace kare
+bool test_api(const std::string& base, const std::string& key, std::string& message) {
+    if (trim_base(base).empty()) {
+        message = "API address is empty";
+        return false;
+    }
+    HttpResult res = http_request("GET", trim_base(base) + "/models", "", auth_headers(key), 8000);
+    if (res.status == 0) {
+        message = res.error.empty() ? "no response" : res.error;
+        return false;
+    }
+    if (res.status >= 400) {
+        message = "HTTP " + std::to_string(res.status);
+        return false;
+    }
+    Json root;
+    std::string perr;
+    int count = 0;
+    if (json_parse(res.body, root, perr) && root.type == Json::Obj) {
+        const Json* data = root.field("data");
+        if (data && data->type == Json::Arr) count = static_cast<int>(data->a.size());
+    }
+    message = std::to_string(count) + " model";
+    return true;
+}
 
-#endif
+}  // namespace kare

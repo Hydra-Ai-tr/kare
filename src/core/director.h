@@ -12,16 +12,20 @@ struct PlanInput {
     std::string aspect;
     double seconds = 0;
     bool mark = true;
+    std::string lang = "tr";
     bool use_api = false;
     std::string api_base;
     std::string api_key;
     std::string api_model;
+    std::string github_token;
 };
 
 struct PlanResult {
     Storyboard board;
     std::string warning;
     bool from_api = false;
+    std::string repo;
+    std::string repo_note;
 };
 
 PlanResult plan(const PlanInput& in);

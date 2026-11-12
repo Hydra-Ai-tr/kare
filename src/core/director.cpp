@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
+#include "core/audio.h"
 #include "core/brain.h"
+#include "core/github.h"
 #include "core/utf8.h"
 
 namespace kare {
@@ -135,6 +138,69 @@ std::vector<std::string> split_sentences(const std::string& text) {
     return out;
 }
 
+bool digit_between(const std::vector<uint32_t>& cps, size_t i) {
+    return i > 0 && i + 1 < cps.size() && is_digit(cps[i - 1]) && is_digit(cps[i + 1]);
+}
+
+// "Head: a, b ve c" -> {"Head", "a", "b", "c"}; the trailing conjunction only splits real lists.
+std::vector<std::string> split_clauses(const std::string& text) {
+    auto cps = utf8_cps(text);
+    std::vector<std::string> out;
+    std::vector<uint32_t> cur;
+    auto flush = [&] {
+        std::string s = tidy(cps_utf8(cur));
+        cur.clear();
+        while (!s.empty() && (s.back() == '.' || s.back() == '!' || s.back() == '?')) s.pop_back();
+        if (!s.empty()) out.push_back(s);
+    };
+    for (size_t i = 0; i < cps.size(); i++) {
+        uint32_t cp = cps[i];
+        bool sep = cp == ',' || cp == ';' || cp == ':' || cp == 0x2014;
+        if ((cp == ',' || cp == ':') && digit_between(cps, i)) sep = false;
+        if ((cp == '-' || cp == 0x2013) && i > 0 && i + 1 < cps.size() && cps[i - 1] == ' ' && cps[i + 1] == ' ') sep = true;
+        if (sep) {
+            flush();
+            continue;
+        }
+        cur.push_back(cp);
+    }
+    flush();
+    if (out.size() >= 2) {
+        for (const char* conj : {" ve ", " and ", " & "}) {
+            std::string last = out.back();
+            auto p = last.find(conj);
+            if (p == std::string::npos) continue;
+            std::string a = tidy(last.substr(0, p)), b = tidy(last.substr(p + std::char_traits<char>::length(conj)));
+            if (a.empty() || b.empty()) continue;
+            out.back() = a;
+            out.push_back(b);
+            break;
+        }
+    }
+    return out;
+}
+
+std::string cap_first(const std::string& s, bool turkish) {
+    auto cps = utf8_cps(s);
+    if (cps.empty()) return s;
+    uint32_t& c = cps[0];
+    if (c == 'i' && turkish) c = 0x130;
+    else if (c >= 'a' && c <= 'z') c -= 32;
+    else if (c == 0xE7 || c == 0xF6 || c == 0xFC) c -= 32;
+    else if (c == 0x15F || c == 0x11F) c -= 1;
+    else if (c == 0x131) c = 'I';
+    return cps_utf8(cps);
+}
+
+bool has_colon_head(const std::string& sentence) {
+    auto cps = utf8_cps(sentence);
+    for (size_t i = 0; i < cps.size(); i++) {
+        if (cps[i] == ',' && !digit_between(cps, i)) return false;
+        if (cps[i] == ':' && !digit_between(cps, i)) return true;
+    }
+    return false;
+}
+
 std::vector<Line> split_lines(const std::string& text) {
     std::vector<Line> lines;
     std::string cur;
@@ -200,15 +266,22 @@ void assign_time(std::vector<Scene>& scenes, double target) {
     double sum = 0;
     for (double x : w) sum += x;
     for (size_t i = 0; i < scenes.size(); i++) scenes[i].seconds = target * w[i] / sum;
-    const char* motions[] = {"zoom", "drift", "rise"};
-    for (size_t i = 0; i < scenes.size(); i++) scenes[i].motion = motions[i % 3];
+    const char* motions[] = {"zoom", "drift", "pan", "rise"};
+    for (size_t i = 0; i < scenes.size(); i++) scenes[i].motion = motions[i % 4];
 }
 
 std::string detect_style(const std::vector<uint32_t>& folded) {
     if (contains(folded, "gün bat") || contains(folded, "gun bat") || contains(folded, "sunset") ||
-        contains(folded, "dusk") || contains(folded, "golden hour"))
+        contains(folded, "dusk") || contains(folded, "golden hour") || contains(folded, "gün doğ") ||
+        contains(folded, "gun dog") || contains(folded, "sunrise") || contains(folded, "şafak") || contains(folded, "dawn"))
         return "dusk";
-    if (contains(folded, "neon") || contains(folded, "siber") || contains(folded, "cyber")) return "neon";
+    if (contains(folded, "neon") || contains(folded, "siber") || contains(folded, "cyber") || contains(folded, "teknoloji") ||
+        contains(folded, "technology") || contains(folded, "yapay zeka") || contains(folded, "yazılım") ||
+        contains(folded, "software") || contains(folded, "oyun") || contains(folded, "gaming"))
+        return "neon";
+    if (contains(folded, "uzay") || contains(folded, "galaksi") || contains(folded, "galaxy") || contains(folded, "space") ||
+        contains(folded, "yıldız") || contains(folded, "stars"))
+        return "night";
     if (contains(folded, "kağıt") || contains(folded, "kagit") || contains(folded, "paper")) return "paper";
     if (contains(folded, "minimal") || contains(folded, "sade")) return "minimal";
     if (contains(folded, "orman") || contains(folded, "forest") || contains(folded, "doğa") || contains(folded, "doga"))
@@ -217,7 +290,7 @@ std::string detect_style(const std::vector<uint32_t>& folded) {
         contains(folded, "sahil") || contains(folded, "beach"))
         return "sea";
     if (contains(folded, "gece") || contains(folded, "night") || contains(folded, "karanl")) return "night";
-    return "ember";
+    return {};
 }
 
 std::string detect_aspect(const std::vector<uint32_t>& folded) {
@@ -226,18 +299,10 @@ std::string detect_aspect(const std::vector<uint32_t>& folded) {
         contains(folded, "vertical"))
         return "9:16";
     if (contains(folded, "1:1") || contains(folded, "square")) return "1:1";
-    return "16:9";
+    return {};
 }
 
-}  // namespace
-
-Storyboard plan_local(const PlanInput& in) {
-    std::vector<uint32_t> cps = utf8_cps(in.prompt);
-    std::vector<uint32_t> folded;
-    folded.reserve(cps.size());
-    for (uint32_t cp : cps) folded.push_back(fold_cp(cp));
-    const std::vector<uint32_t> folded_original = folded;
-
+double take_seconds(std::vector<uint32_t>& cps, std::vector<uint32_t>& folded) {
     double seconds = 0;
     for (size_t i = 0; i < folded.size();) {
         if (!is_digit(folded[i])) {
@@ -283,6 +348,76 @@ Storyboard plan_local(const PlanInput& in) {
         erase_range(cps, folded, start, unit + unit_len);
         break;
     }
+    return seconds;
+}
+
+std::vector<uint32_t> folded_of(const std::vector<uint32_t>& cps) {
+    std::vector<uint32_t> folded;
+    folded.reserve(cps.size());
+    for (uint32_t cp : cps) folded.push_back(fold_cp(cp));
+    return folded;
+}
+
+PlanResult plan_repo(const PlanInput& in, const std::string& owner, const std::string& name) {
+    PlanResult result;
+    PlanInput eff = in;
+    std::string note = strip_github_url(in.prompt);
+    auto cps = utf8_cps(note);
+    auto folded = folded_of(cps);
+    double hinted = take_seconds(cps, folded);
+    if (eff.seconds <= 0 && hinted > 0) eff.seconds = std::min(120.0, std::max(2.0, hinted));
+    if (eff.style.empty()) eff.style = detect_style(folded);
+    if (eff.aspect.empty()) eff.aspect = detect_aspect(folded);
+
+    RepoInfo info;
+    std::string err;
+    bool fetched = fetch_repo(owner, name, in.github_token, info, err);
+    if (!fetched) {
+        result.warning = err;
+        info = RepoInfo{};
+        info.owner = owner;
+        info.name = name;
+    }
+    result.repo = info.owner + "/" + info.name;
+    result.repo_note = repo_note(info, in.lang != "en");
+
+    if (fetched && in.use_api) {
+        PlanInput api = eff;
+        api.prompt = "Create a short promo / explainer video storyboard for this GitHub project. "
+                     "Use only the facts below; do not invent features. First scene names the project, "
+                     "last scene shows github.com/" + info.owner + "/" + info.name + ".\n" +
+                     std::string("On-screen language: ") + (in.lang == "en" ? "English" : "Turkish") + "\n" +
+                     (note.empty() ? "" : "User request: " + note + "\n") + repo_brief(info);
+        Storyboard board;
+        std::string aerr;
+        if (plan_with_api(api, board, aerr)) {
+            if (!eff.aspect.empty()) board.aspect = eff.aspect;
+            if (!eff.style.empty()) board.style = eff.style;
+            board.mark = in.mark;
+            board.prompt = in.prompt;
+            apply_aspect_size(board);
+            if (eff.seconds > 0) scale_duration(board, eff.seconds);
+            normalize(board);
+            snap_to_beat(board, eff.seconds);
+            result.board = std::move(board);
+            result.from_api = true;
+            return result;
+        }
+        result.warning = aerr.empty() ? "API plan failed" : aerr;
+    }
+    result.board = plan_repo_local(info, eff);
+    return result;
+}
+
+}  // namespace
+
+Storyboard plan_local(const PlanInput& in) {
+    const bool turkish = in.lang != "en";
+    std::vector<uint32_t> cps = utf8_cps(in.prompt);
+    std::vector<uint32_t> folded = folded_of(cps);
+    const std::vector<uint32_t> folded_original = folded;
+
+    double seconds = take_seconds(cps, folded);
 
     std::string title;
     const std::vector<std::vector<uint32_t>> title_keys = {needle("başlık:"), needle("baslik:"), needle("title:")};
@@ -327,7 +462,9 @@ Storyboard plan_local(const PlanInput& in) {
     board.prompt = in.prompt;
     board.mark = in.mark;
     board.style = !in.style.empty() ? in.style : detect_style(folded_original);
+    if (board.style.empty()) board.style = "ember";
     board.aspect = !in.aspect.empty() ? in.aspect : detect_aspect(folded_original);
+    if (board.aspect.empty()) board.aspect = "16:9";
     board.title = title;
 
     auto lines = split_lines(cps_utf8(cps));
@@ -357,11 +494,27 @@ Storyboard plan_local(const PlanInput& in) {
             if (!heading.empty() && heading != board.title) open.text = heading;
             board.scenes.push_back(open);
         }
+        int shown = 0;
+        int count = std::min<int>(static_cast<int>(items.size()), 8);
         for (const auto& item : items) {
-            if (static_cast<int>(board.scenes.size()) >= 8) break;
+            if (shown >= count) break;
             Scene s;
             s.title = item.text;
+            char k[24];
+            std::snprintf(k, sizeof(k), "%02d / %02d", shown + 1, count);
+            s.kicker = k;
             board.scenes.push_back(s);
+            shown++;
+        }
+        if (count >= 3 && seconds >= 12) {
+            Scene recap;
+            recap.title = heading.empty() ? board.title : heading;
+            for (int i = 0; i < count; i++) {
+                if (i) recap.text.push_back('\n');
+                recap.text += items[static_cast<size_t>(i)].text;
+            }
+            recap.layout = "list";
+            board.scenes.push_back(recap);
         }
     } else {
         auto sentences = split_sentences(spoken);
@@ -371,33 +524,81 @@ Storyboard plan_local(const PlanInput& in) {
             board.scenes.push_back(s);
         } else if (sentences.size() <= 1) {
             std::string sentence = sentences.empty() ? spoken : sentences.front();
-            int beats = seconds >= 7 && !sentence.empty() ? 2 : 1;
-            for (int b = 0; b < beats; b++) {
-                Scene s;
-                if (b == 0 && !title.empty()) {
-                    s.title = title;
-                    s.text = sentence == title ? "" : sentence;
-                } else if (sentence.size() <= 48) {
-                    s.title = sentence;
-                } else if (b == 0 && title.empty()) {
-                    s.title = first_words(sentence, 5);
-                    s.text = sentence;
-                } else {
-                    s.text = sentence;
+            auto clauses = split_clauses(sentence);
+            bool short_clauses = clauses.size() >= 2;
+            for (const auto& c : clauses)
+                if (utf8_cps(c).size() > 60) short_clauses = false;
+            if (short_clauses && (has_colon_head(sentence) || clauses.size() >= 3 || !title.empty())) {
+                std::string head = title.empty() ? cap_first(clauses.front(), turkish) : title;
+                size_t first_item = title.empty() ? 1 : 0;
+                size_t count = std::min<size_t>(clauses.size() - first_item, 7);
+                Scene open;
+                open.title = head;
+                board.scenes.push_back(open);
+                for (size_t k = 0; k < count; k++) {
+                    Scene s;
+                    s.title = cap_first(clauses[first_item + k], turkish);
+                    char kicker[24];
+                    std::snprintf(kicker, sizeof(kicker), "%02d / %02d", static_cast<int>(k + 1), static_cast<int>(count));
+                    s.kicker = kicker;
+                    board.scenes.push_back(s);
                 }
+                if (count >= 2 && seconds >= 14) {
+                    Scene close;
+                    close.title = head;
+                    for (size_t k = 0; k < count; k++) {
+                        if (k) close.text += "  \xC2\xB7  ";
+                        close.text += cap_first(clauses[first_item + k], turkish);
+                    }
+                    close.layout = "statement";
+                    close.transition = "flash";
+                    board.scenes.push_back(close);
+                }
+                if (board.title.empty()) board.title = head;
+            } else if (!title.empty()) {
+                Scene s;
+                s.title = title;
+                s.text = sentence == title ? "" : sentence;
                 board.scenes.push_back(s);
+            } else if (utf8_cps(sentence).size() <= 48 || words_of(sentence).size() < 8) {
+                Scene s;
+                s.title = cap_first(sentence, turkish);
+                board.scenes.push_back(s);
+            } else {
+                auto w = words_of(sentence);
+                size_t half = w.size() / 2;
+                Scene a, b;
+                for (size_t k = 0; k < w.size(); k++) {
+                    std::string& dst = k < half ? a.title : b.title;
+                    if (!dst.empty()) dst.push_back(' ');
+                    dst += w[k];
+                }
+                a.title = cap_first(a.title, turkish);
+                b.title = cap_first(b.title, turkish);
+                b.layout = "statement";
+                board.scenes.push_back(a);
+                board.scenes.push_back(b);
             }
         } else {
             size_t limit = std::min<size_t>(sentences.size(), 8);
             for (size_t i = 0; i < limit; i++) {
                 Scene s;
+                const std::string& sentence = sentences[i];
+                auto clauses = split_clauses(sentence);
                 if (i == 0 && !title.empty()) {
                     s.title = title;
-                    s.text = sentences[i];
-                } else if (sentences[i].size() <= 48) {
-                    s.title = sentences[i];
+                    s.text = sentence;
+                } else if (utf8_cps(sentence).size() <= 48) {
+                    s.title = sentence;
+                } else if (clauses.size() >= 2 && utf8_cps(clauses.front()).size() <= 48) {
+                    s.title = cap_first(clauses.front(), turkish);
+                    for (size_t k = 1; k < clauses.size(); k++) {
+                        if (k > 1) s.text += ", ";
+                        s.text += clauses[k];
+                    }
+                    s.text = cap_first(s.text, turkish);
                 } else {
-                    s.text = sentences[i];
+                    s.text = sentence;
                 }
                 board.scenes.push_back(s);
             }
@@ -419,10 +620,13 @@ Storyboard plan_local(const PlanInput& in) {
     assign_time(board.scenes, seconds);
     apply_aspect_size(board);
     normalize(board);
+    snap_to_beat(board, seconds);
     return board;
 }
 
 PlanResult plan(const PlanInput& in) {
+    std::string owner, repo;
+    if (find_github_repo(in.prompt, owner, repo)) return plan_repo(in, owner, repo);
     PlanResult result;
     if (in.use_api) {
         std::string err;
@@ -435,6 +639,7 @@ PlanResult plan(const PlanInput& in) {
             apply_aspect_size(board);
             if (in.seconds > 0) scale_duration(board, in.seconds);
             normalize(board);
+            snap_to_beat(board, in.seconds);
             result.board = std::move(board);
             result.from_api = true;
             return result;

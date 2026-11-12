@@ -13,14 +13,50 @@ double total_seconds(const Storyboard& board) {
     return t;
 }
 
+namespace {
+
+bool listed(const std::vector<std::string>& ids, const std::string& v) {
+    return std::find(ids.begin(), ids.end(), v) != ids.end();
+}
+
+}  // namespace
+
+const std::vector<std::string>& layout_ids() {
+    static const std::vector<std::string> ids = {"auto", "hero",     "statement", "list",  "stat",     "quote",
+                                                 "split", "terminal", "bars",      "media", "showcase", "end"};
+    return ids;
+}
+
+const std::vector<std::string>& transition_ids() {
+    static const std::vector<std::string> ids = {"auto", "fade", "slide", "wipe", "zoom", "flash", "glitch", "cut"};
+    return ids;
+}
+
+const std::vector<std::string>& anim_ids() {
+    static const std::vector<std::string> ids = {"auto", "rise", "fade", "type", "reveal", "spring"};
+    return ids;
+}
+
+const std::vector<std::string>& music_ids() {
+    static const std::vector<std::string> ids = {"auto", "none", "ambient", "pulse", "drive", "lofi"};
+    return ids;
+}
+
+const std::vector<std::string>& motion_ids() {
+    static const std::vector<std::string> ids = {"drift", "zoom", "rise", "pan", "still"};
+    return ids;
+}
+
 bool known_style(const std::string& style) {
     return style == "ember" || style == "dusk" || style == "night" || style == "sea" || style == "forest" ||
            style == "neon" || style == "paper" || style == "minimal";
 }
 
-bool known_motion(const std::string& motion) {
-    return motion == "drift" || motion == "zoom" || motion == "rise";
-}
+bool known_motion(const std::string& motion) { return listed(motion_ids(), motion); }
+bool known_layout(const std::string& layout) { return listed(layout_ids(), layout); }
+bool known_transition(const std::string& transition) { return listed(transition_ids(), transition); }
+bool known_anim(const std::string& anim) { return listed(anim_ids(), anim); }
+bool known_music(const std::string& music) { return listed(music_ids(), music); }
 
 void apply_aspect_size(Storyboard& board) {
     if (board.aspect == "9:16") {
@@ -56,7 +92,8 @@ void normalize(Storyboard& board) {
     if (board.aspect != "16:9" && board.aspect != "9:16" && board.aspect != "1:1") board.aspect = "16:9";
     if (!valid_size(board.width, board.height)) apply_aspect_size(board);
     if (!known_style(board.style)) board.style = "ember";
-    if (board.scenes.size() > 12) board.scenes.resize(12);
+    if (!known_music(board.music)) board.music = "auto";
+    if (board.scenes.size() > static_cast<size_t>(kMaxScenes)) board.scenes.resize(static_cast<size_t>(kMaxScenes));
     if (board.scenes.empty()) {
         Scene s;
         s.title = "Kare";
@@ -67,10 +104,14 @@ void normalize(Storyboard& board) {
     for (auto& s : board.scenes) {
         if (!known_motion(s.motion)) s.motion = "drift";
         if (!s.style.empty() && !known_style(s.style)) s.style.clear();
+        if (!known_layout(s.layout)) s.layout = "auto";
+        if (!known_transition(s.transition)) s.transition = "auto";
+        if (!known_anim(s.anim)) s.anim = "auto";
+        s.kicker = tidy(s.kicker);
         if (s.seconds < 0.4) s.seconds = 0.4;
         if (s.seconds > 20) s.seconds = 20;
         s.title = tidy(s.title);
-        s.text = tidy(s.text);
+        s.text = tidy_lines(s.text);
     }
     double t = total_seconds(board);
     if (t > 120.0) scale_duration(board, 120.0);
@@ -95,17 +136,18 @@ bool move_scene(Storyboard& board, int from, int to) {
 }
 
 void add_scene(Storyboard& board, int index) {
+    if (static_cast<int>(board.scenes.size()) >= kMaxScenes) return;
     Scene s;
     s.title = "Yeni sahne";
     s.seconds = 2.5;
-    const char* motions[] = {"drift", "zoom", "rise"};
-    s.motion = motions[board.scenes.size() % 3];
+    const char* motions[] = {"drift", "zoom", "pan", "rise"};
+    s.motion = motions[board.scenes.size() % 4];
     if (index < 0 || index > static_cast<int>(board.scenes.size())) index = static_cast<int>(board.scenes.size());
     board.scenes.insert(board.scenes.begin() + index, std::move(s));
 }
 
 void duplicate_scene(Storyboard& board, int index) {
-    if (index < 0 || index >= static_cast<int>(board.scenes.size())) return;
+    if (index < 0 || index >= static_cast<int>(board.scenes.size()) || static_cast<int>(board.scenes.size()) >= kMaxScenes) return;
     Scene s = board.scenes[static_cast<size_t>(index)];
     board.scenes.insert(board.scenes.begin() + index + 1, std::move(s));
 }
@@ -126,6 +168,8 @@ std::string story_to_json(const Storyboard& board) {
     j.put("width", Json::numv(board.width));
     j.put("height", Json::numv(board.height));
     j.put("mark", Json::boolv(board.mark));
+    j.put("music", Json::strv(board.music));
+    j.put("grain", Json::boolv(board.grain));
     Json scenes = Json::arr();
     for (const auto& s : board.scenes) {
         Json o = Json::obj();
@@ -134,6 +178,11 @@ std::string story_to_json(const Storyboard& board) {
         o.put("seconds", Json::numv(s.seconds));
         o.put("motion", Json::strv(s.motion));
         o.put("style", Json::strv(s.style));
+        o.put("layout", Json::strv(s.layout));
+        o.put("transition", Json::strv(s.transition));
+        o.put("anim", Json::strv(s.anim));
+        if (!s.kicker.empty()) o.put("kicker", Json::strv(s.kicker));
+        if (!s.image.empty()) o.put("image", Json::strv(s.image));
         scenes.a.push_back(std::move(o));
     }
     j.put("scenes", std::move(scenes));
@@ -156,6 +205,8 @@ bool story_from_json(const std::string& text, Storyboard& board, std::string& er
     b.width = static_cast<int>(j.num("width", 0));
     b.height = static_cast<int>(j.num("height", 0));
     b.mark = j.boolean("mark", true);
+    b.music = j.str("music", "auto");
+    b.grain = j.boolean("grain", true);
     const Json* scenes = j.field("scenes");
     if (scenes && scenes->type == Json::Arr) {
         for (const auto& item : scenes->a) {
@@ -166,7 +217,12 @@ bool story_from_json(const std::string& text, Storyboard& board, std::string& er
             s.seconds = item.num("seconds", 2.5);
             s.motion = item.str("motion", "drift");
             s.style = item.str("style");
-            if (s.title.empty() && s.text.empty()) continue;
+            s.layout = item.str("layout", "auto");
+            s.transition = item.str("transition", "auto");
+            s.anim = item.str("anim", "auto");
+            s.kicker = item.str("kicker");
+            s.image = item.str("image");
+            if (s.title.empty() && s.text.empty() && s.image.empty()) continue;
             b.scenes.push_back(std::move(s));
         }
     }
@@ -191,7 +247,15 @@ bool load_story(const std::string& path, Storyboard& board, std::string& err) {
         err = "could not read project";
         return false;
     }
-    return story_from_json(text, board, err);
+    if (!story_from_json(text, board, err)) return false;
+    size_t slash = path.find_last_of("\\/");
+    std::string dir = slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
+    for (auto& s : board.scenes) {
+        const std::string& im = s.image;
+        bool absolute = (im.size() > 1 && im[1] == ':') || (!im.empty() && (im[0] == '\\' || im[0] == '/'));
+        if (!im.empty() && !absolute && !dir.empty()) s.image = dir + im;
+    }
+    return true;
 }
 
 }  // namespace kare

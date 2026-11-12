@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Kare VERSION 0.1.0 LANGUAGES CXX)
+project(Kare VERSION 0.2.0 LANGUAGES CXX)
 
 option(KARE_BUILD_GUI "Build the Kare desktop application" ON)
 
@@ -23,10 +23,13 @@ add_library(karecore STATIC
   src/core/json.cpp
   src/core/story.cpp
   src/core/director.cpp
+  src/core/http.cpp
+  src/core/github.cpp
   src/core/brain.cpp
   src/core/config.cpp
   src/core/font.cpp
   src/core/render.cpp
+  src/core/audio.cpp
   src/core/encode.cpp)
 target_include_directories(karecore PUBLIC src PRIVATE ${CMAKE_SOURCE_DIR}/third_party)
 target_compile_definitions(karecore PUBLIC KARE_VERSION="${PROJECT_VERSION}")
@@ -86,7 +89,7 @@ if(KARE_BUILD_GUI)
   add_executable(kare WIN32 src/app/main.cpp src/app/ui.cpp)
   target_link_libraries(kare PRIVATE karecore imgui)
   if(WIN32)
-    target_link_libraries(kare PRIVATE comdlg32 gdi32)
+    target_link_libraries(kare PRIVATE comdlg32 gdi32 dwmapi pdh winmm)
   endif()
   if(MSVC)
     target_link_options(kare PRIVATE /ENTRY:mainCRTStartup)

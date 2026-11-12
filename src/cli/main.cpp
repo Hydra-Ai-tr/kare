@@ -3,10 +3,12 @@
 #include <iostream>
 #include <string>
 
+#include "core/audio.h"
 #include "core/config.h"
 #include "core/director.h"
 #include "core/encode.h"
 #include "core/font.h"
+#include "core/github.h"
 #include "core/render.h"
 #include "core/story.h"
 #include "core/utf8.h"
@@ -84,6 +86,14 @@ int selftest() {
     expect(night_board.style == "night", "night style");
     expect(scene_has(night_board, "market") || scene_has(night_board, "Night"), "night text");
 
+    kare::PlanInput clauses;
+    clauses.prompt = "Kapadokya'da gün doğumu: sıcak hava balonları, peri bacaları ve sessiz bir sabah, 20 saniye";
+    auto clause_board = kare::plan_local(clauses);
+    expect(clause_board.title == "Kapadokya'da gün doğumu" && clause_board.style == "dusk", "clause head");
+    expect(clause_board.scenes.size() == 5 && scene_has(clause_board, "Peri bacaları") &&
+               scene_has(clause_board, "Sessiz bir sabah"),
+           "clause scenes");
+
     std::string dumped = kare::story_to_json(dusk_board);
     kare::Storyboard round;
     std::string err;
@@ -96,6 +106,42 @@ int selftest() {
     expect(kare::story_from_json(sample, parsed, err), "sample json");
     expect(parsed.title == "Merhaba" && parsed.style == "sea" && parsed.scenes.size() == 1, "sample fields");
     expect(parsed.scenes[0].motion == "rise", "sample motion");
+
+    std::string owner, repo;
+    expect(kare::find_github_repo("bunu incele https://github.com/Hydra-Ai-tr/kare.git 20 saniye", owner, repo) &&
+               owner == "Hydra-Ai-tr" && repo == "kare",
+           "github url");
+    expect(kare::find_github_repo("github.com/ocornut/imgui/tree/master", owner, repo) && repo == "imgui", "github tree url");
+    expect(!kare::find_github_repo("https://github.com/orgs/x", owner, repo), "github org url");
+    expect(kare::strip_github_url("https://github.com/a/b dikey 10 saniye") == "dikey 10 saniye", "github note");
+    expect(kare::clean_markdown("**Fast** [docs](https://x.y) `cmd` :rocket:") == "Fast docs cmd", "markdown clean");
+    const char* readme =
+        "# Demo\n[![ci](https://b/x.svg)](https://c)\n\nDemo turns prompts into short local videos for everyone.\n\n"
+        "## Install\n- run this\n- then that\n\n## Features\n- **Local** - works offline\n- Fast export\n- Tiny\n";
+    expect(kare::readme_summary(readme).find("Demo turns prompts") == 0, "readme summary");
+    auto feats = kare::readme_features(readme, 3);
+    expect(feats.size() == 3 && feats[0] == "Local - works offline", "readme features");
+    kare::RepoInfo info;
+    info.owner = "a";
+    info.name = "demo";
+    info.description = "Local video studio";
+    info.readme = readme;
+    info.stars = 1520;
+    info.license = "MIT";
+    info.languages = {{"C++", 0.9}, {"C", 0.1}};
+    info.tooling = {"CMake"};
+    info.files = 12;
+    kare::PlanInput repo_in;
+    auto repo_board = kare::plan_repo_local(info, repo_in);
+    expect(repo_board.title == "demo" && repo_board.style == "night", "repo board");
+    expect(scene_has(repo_board, "github.com/a/demo") && scene_has(repo_board, "1.5k"), "repo end card");
+    expect(scene_has(repo_board, "Local") && scene_has(repo_board, "C++ %90"), "repo features and tech");
+    std::string repo_layouts;
+    for (int i = 0; i < static_cast<int>(repo_board.scenes.size()); i++) repo_layouts += kare::resolve_layout(repo_board, i) + " ";
+    expect(contains(repo_layouts, "hero") && contains(repo_layouts, "list") && contains(repo_layouts, "bars") &&
+               contains(repo_layouts, "terminal") && contains(repo_layouts, "stat") && contains(repo_layouts, "end"),
+           "repo edit layouts");
+    if (fails) std::cout << "     " << repo_layouts << "\n";
 
     kare::Storyboard moved = list_board;
     std::string first = moved.scenes.front().title;
@@ -147,7 +193,9 @@ int selftest() {
     expect(enc.empty(), "encode mp4");
     if (!enc.empty()) std::cout << "     " << enc << "\n";
     std::string probe_err;
-    expect(kare::probe_video(mp4, probe_err), "read mp4 back");
+    bool mp4_audio = false;
+    expect(kare::probe_video(mp4, probe_err, &mp4_audio), "read mp4 back");
+    expect(mp4_audio, "mp4 has audio");
     if (!probe_err.empty() && !enc.empty()) std::cout << "     " << probe_err << "\n";
     else if (!probe_err.empty()) std::cout << "     " << probe_err << "\n";
 
@@ -165,6 +213,63 @@ int selftest() {
         }
     }
     expect(jpeg, "avi jpeg");
+    std::string avi_text(avi_bytes.begin(), avi_bytes.end());
+    expect(contains(avi_text, "auds") && contains(avi_text, "01wb"), "avi audio stream");
+
+    auto track = kare::render_soundtrack(dusk_board);
+    double track_sec = static_cast<double>(track.size() / 2) / kare::kAudioRate;
+    expect(std::abs(track_sec - kare::total_seconds(dusk_board)) < 0.05, "soundtrack length");
+    double energy = 0;
+    int clipped = 0;
+    for (int16_t v : track) {
+        energy += static_cast<double>(v) * v;
+        if (v >= 32000 || v <= -32000) clipped++;
+    }
+    double rms = track.empty() ? 0 : std::sqrt(energy / static_cast<double>(track.size())) / 32768.0;
+    expect(rms > 0.05 && rms < 0.6, "soundtrack level");
+    expect(clipped < static_cast<int>(track.size() / 1000) + 1, "soundtrack not clipped");
+    auto wav = kare::wav_bytes(track, 0);
+    expect(wav.size() == 44 + track.size() * 2 && wav[0] == 'R' && wav[8] == 'W', "wav bytes");
+    kare::Storyboard silent = dusk_board;
+    silent.music = "none";
+    expect(kare::render_soundtrack(silent).empty(), "music none is silent");
+
+    kare::Storyboard snapped = dusk_board;
+    kare::snap_to_beat(snapped, 8.0);
+    double beat = kare::beat_seconds(snapped);
+    bool on_grid = std::abs(kare::total_seconds(snapped) - 8.0) < 0.01;
+    for (const auto& s : snapped.scenes) {
+        double k = s.seconds / beat;
+        on_grid = on_grid && std::abs(k - std::round(k)) < 1e-3;
+    }
+    expect(on_grid, "scenes snap to beat");
+
+    kare::Storyboard lay;
+    lay.title = "Kare";
+    kare::Scene a;
+    a.title = "Kare";
+    a.text = "Yerel video stüdyosu";
+    lay.scenes.push_back(a);
+    kare::Scene st;
+    st.title = "%98";
+    st.text = "daha hızlı";
+    lay.scenes.push_back(st);
+    kare::Scene li;
+    li.title = "Özellikler";
+    li.text = "Yerel\nHızlı\nÜcretsiz";
+    lay.scenes.push_back(li);
+    kare::Scene end;
+    end.title = "Şimdi dene";
+    end.text = "github.com/Hydra-Ai-tr/kare";
+    lay.scenes.push_back(end);
+    kare::normalize(lay);
+    expect(kare::resolve_layout(lay, 0) == "hero", "layout hero");
+    expect(kare::resolve_layout(lay, 1) == "stat", "layout stat");
+    expect(kare::resolve_layout(lay, 2) == "list", "layout list");
+    expect(kare::resolve_layout(lay, 3) == "end", "layout end");
+    kare::Frame mid;
+    kare::render_frame(lay, lay.scenes[0].seconds - 0.1, mid);
+    expect(!mid.rgba.empty(), "transition frame");
 
 #ifdef _WIN32
     _wremove(kare::widen(mp4).c_str());
@@ -176,9 +281,11 @@ int selftest() {
 
 void usage() {
     std::cout << "Kare " << KARE_VERSION << "\n\n"
-              << "kare-cli plan \"prompt\" [--seconds N] [--aspect 16:9|9:16|1:1] [--style name] [--api]\n"
+              << "kare-cli plan \"prompt\" [-o file.kare] [--seconds N] [--aspect 16:9|9:16|1:1] [--style name] [--api] [--lang tr|en]\n"
+              << "kare-cli plan https://github.com/owner/repo   (inspects the repository)\n"
               << "kare-cli render \"prompt\" -o video.mp4 [same flags] [--project file.kare]\n"
-              << "kare-cli frame \"prompt\" -o frame.png\n"
+              << "kare-cli frame \"prompt\" -o frame.png [--at seconds] [--project file.kare]\n"
+              << "kare-cli audio \"prompt\" -o music.wav [--project file.kare]\n"
               << "kare-cli selftest\n";
 }
 
@@ -188,7 +295,9 @@ struct Args {
     std::string project;
     std::string aspect;
     std::string style;
+    std::string lang;
     double seconds = 0;
+    double at = -1;
     bool api = false;
 };
 
@@ -207,6 +316,9 @@ Args parse_args(const std::vector<std::string>& argv) {
         } else if (s == "--seconds") {
             std::string v;
             if (take(i, argv, v)) a.seconds = std::atof(v.c_str());
+        } else if (s == "--at") {
+            std::string v;
+            if (take(i, argv, v)) a.at = std::atof(v.c_str());
         } else if (s == "--aspect") {
             take(i, argv, a.aspect);
         } else if (s == "--style") {
@@ -215,6 +327,8 @@ Args parse_args(const std::vector<std::string>& argv) {
             take(i, argv, a.project);
         } else if (s == "--api") {
             a.api = true;
+        } else if (s == "--lang") {
+            take(i, argv, a.lang);
         } else {
             if (!a.prompt.empty()) a.prompt.push_back(' ');
             a.prompt += s;
@@ -229,8 +343,10 @@ kare::PlanInput to_input(const Args& a) {
     in.seconds = a.seconds;
     in.aspect = a.aspect;
     in.style = a.style;
+    kare::Config cfg = kare::load_config();
+    in.lang = a.lang.empty() ? cfg.lang : a.lang;
+    in.github_token = cfg.github_token;
     if (a.api) {
-        kare::Config cfg = kare::load_config();
         in.use_api = true;
         in.api_base = cfg.api_base;
         in.api_key = cfg.api_key;
@@ -281,10 +397,19 @@ int main(int argc, char** argv) {
     if (cmd == "plan") {
         auto result = kare::plan(to_input(options));
         if (!result.warning.empty()) std::cerr << result.warning << "\n";
-        std::cout << kare::story_to_json(result.board) << "\n";
+        if (options.out.empty()) {
+            std::cout << kare::story_to_json(result.board) << "\n";
+            return 0;
+        }
+        std::string err;
+        if (!kare::save_story(options.out, result.board, err)) {
+            std::cerr << err << "\n";
+            return 1;
+        }
+        std::cout << options.out << "\n";
         return 0;
     }
-    if (cmd == "render" || cmd == "frame") {
+    if (cmd == "render" || cmd == "frame" || cmd == "audio") {
         kare::Storyboard board;
         if (!options.project.empty()) {
             std::string err;
@@ -300,10 +425,24 @@ int main(int argc, char** argv) {
             if (!result.warning.empty()) std::cerr << result.warning << "\n";
             board = result.board;
         }
-        if (options.out.empty()) options.out = cmd == "frame" ? "kare.png" : "kare.mp4";
+        if (options.out.empty()) options.out = cmd == "frame" ? "kare.png" : cmd == "audio" ? "kare.wav" : "kare.mp4";
+        if (cmd == "audio") {
+            auto track = kare::render_soundtrack(board);
+            if (track.empty()) {
+                std::cerr << "no music for this board\n";
+                return 1;
+            }
+            auto wav = kare::wav_bytes(track, 0);
+            if (!kare::write_bytes(options.out, wav.data(), wav.size())) {
+                std::cerr << "could not write " << options.out << "\n";
+                return 1;
+            }
+            std::cout << options.out << "\n";
+            return 0;
+        }
         if (cmd == "frame") {
             std::string err;
-            double t = kare::total_seconds(board) * 0.4;
+            double t = options.at >= 0 ? options.at : kare::total_seconds(board) * 0.4;
             if (!kare::write_preview_png(options.out, board, t, err)) {
                 std::cerr << err << "\n";
                 return 1;

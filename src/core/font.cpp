@@ -91,7 +91,7 @@ bool fonts_ready() { return g_ready; }
 const Glyph& glyph_for(bool bold, uint32_t cp, int px) {
     if (!g_ready) return g_empty;
     if (px < 8) px = 8;
-    if (px > 220) px = 220;
+    if (px > 320) px = 320;
     Face& f = face(bold);
     uint64_t key = (static_cast<uint64_t>(cp) << 16) | static_cast<unsigned>(px);
     std::lock_guard<std::mutex> lock(f.mu);
