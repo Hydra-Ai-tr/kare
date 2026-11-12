@@ -1,0 +1,13 @@
+build/
+dist/
+.vs/
+.idea/
+cmake-build-*/
+*.user
+*.obj
+*.o
+*.exe
+*.mp4
+*.avi
+*.png
+!docs/**

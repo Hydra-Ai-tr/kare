@@ -1,0 +1,6 @@
+* text=auto
+*.ttf binary
+*.h text eol=lf
+*.cpp text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
