@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Kare VERSION 0.2.0 LANGUAGES CXX)
+project(Kare VERSION 0.3.0 LANGUAGES CXX)
 
 option(KARE_BUILD_GUI "Build the Kare desktop application" ON)
 
@@ -30,12 +30,14 @@ add_library(karecore STATIC
   src/core/font.cpp
   src/core/render.cpp
   src/core/audio.cpp
+  src/core/tts.cpp
+  src/core/web.cpp
   src/core/encode.cpp)
 target_include_directories(karecore PUBLIC src PRIVATE ${CMAKE_SOURCE_DIR}/third_party)
 target_compile_definitions(karecore PUBLIC KARE_VERSION="${PROJECT_VERSION}")
 if(WIN32)
   target_compile_definitions(karecore PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
-  target_link_libraries(karecore PUBLIC winhttp ole32 uuid shell32 mfplat mfreadwrite mfuuid)
+  target_link_libraries(karecore PUBLIC winhttp ole32 oleaut32 uuid shell32 mfplat mfreadwrite mfuuid)
 endif()
 find_package(Threads REQUIRED)
 target_link_libraries(karecore PUBLIC Threads::Threads)

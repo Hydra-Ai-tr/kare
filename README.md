@@ -12,11 +12,30 @@ Kare bir video difüzyon modeli değildir ve dev bir model dosyası indirmez. Ü
 
 ![Kurgu ekranı](docs/promo/edit.jpg)
 
+## Konu anlatan Shorts: araştırır, seslendirir, kurgular
+
+`Titanik olayını anlatan shorts videosu yap` yazın. Kare:
+
+1. Konuyu Vikipedi'de bulur (Türkçe yoksa İngilizcesine bakar), girişi ve olayı anlatan bölümleri okur.
+2. Makaledeki fotoğrafları Wikimedia Commons'tan indirir, logo ve bayrak gibi işe yaramayanları eler, her cümleye en uygun görseli eşler.
+3. Anlatım metnini yazar (API açıksa yapay zekâ yazar, kapalıysa makaleden çıkarır).
+4. Windows'un konuşma sesiyle **Türkçe ya da İngilizce** seslendirir; sahne süreleri sese göre ayarlanır.
+5. 1080×1920 dikey kurgu yapar: fotoğraflarda Ken Burns kamera hareketi, bulanık arka plan, kelime kelime sarı vurgulu alt yazı.
+6. Konuya göre arka plan müziği seçer (felaket/savaş → ambient, spor/teknoloji → drive …) ve konuşurken müziği kısar.
+7. Kaynak ve görsel lisanslarını kapanış kartına ve dışa aktarılan videonun yanına `.credits.txt` olarak yazar.
+
+[![Titanik shorts örneği](docs/promo/titanik-shorts.jpg)](https://github.com/Hydra-Ai-tr/kare/releases/download/v0.3.0/titanik-shorts-tr.mp4)
+
+*Kare'nin tek bir promptla, çevrimdışı planlayıcı ve "Microsoft Tolga" sesiyle yaptığı örnek: [Türkçe](https://github.com/Hydra-Ai-tr/kare/releases/download/v0.3.0/titanik-shorts-tr.mp4) · [English](https://github.com/Hydra-Ai-tr/kare/releases/download/v0.3.0/titanic-shorts-en.mp4)*
+
+Oluştur sayfasında **Shorts**, **İnternetten araştır** ve **Seslendirme** seçenekleri var. `anlatan`, `hakkında`, `tarihi`, `nedir`, `kimdir` gibi kelimeler araştırmayı kendiliğinden açar. Sahne ayarlarında her sahnenin anlatım metni düzenlenebilir; ses, konuşma hızı ve alt yazı biçimi video ayarlarındadır. Yüklü sesleri `kare-cli voices` listeler; yeni ses için Windows **Ayarlar → Zaman ve dil → Konuşma**.
+
 ## Ne yapar
 
 - Türkçe ve İngilizce promptu çevrimdışı kurgular: `8 saniye`, `dikey`, `başlık: "Boğaz"`, madde listesi, `Kapadokya: balonlar, peri bacaları ve sabah` gibi virgüllü cümleler.
 - GitHub bağlantısı yapıştırınca repoyu inceler (README, diller, yıldız, derleme araçları) ve tanıtım videosu kurar.
-- 11 yerleşim: kapak, açıklama, liste, sayı, alıntı, iki sütun, terminal, çubuk grafik, görsel, vitrin, kapanış.
+- İnternet araştırmalı, seslendirmeli, alt yazılı Shorts ve yatay belgesel videolar (yukarıda).
+- 12 yerleşim: kapak, açıklama, liste, sayı, alıntı, iki sütun, terminal, çubuk grafik, görsel, vitrin, belgesel, kapanış.
 - 7 geçiş: çapraz geçiş, kaydırma, silme, yakınlaşma, flaş, glitch, kesme.
 - Kelime kelime yazı animasyonları (yükselme, belirme, daktilo, açılma, yay) ve `*vurgu*` işareti.
 - Kendi müziğini besteler: ambient, nabız, sürüş, lofi. Kesmelerde whoosh, kapanışta riser ve boom. Sahneler müziğin vuruşuna oturur.
@@ -29,7 +48,7 @@ Kare bir video difüzyon modeli değildir ve dev bir model dosyası indirmez. Ü
 
 ## Kurulum
 
-[Sürümler](https://github.com/Hydra-Ai-tr/kare/releases/latest) sayfasından `kare-0.2.0-windows-x64.zip` dosyasını indirip açın. `kare.exe` masaüstü uygulamasıdır, `kare-cli.exe` komut satırıdır. Windows 10 veya daha yenisi gerekir.
+[Sürümler](https://github.com/Hydra-Ai-tr/kare/releases/latest) sayfasından `kare-0.3.0-windows-x64.zip` dosyasını indirip açın. `kare.exe` masaüstü uygulamasıdır, `kare-cli.exe` komut satırıdır. Windows 10 veya daha yenisi gerekir.
 
 İmza henüz yok. SmartScreen uyarırsa **Diğer bilgiler → Yine de çalıştır**.
 
@@ -45,6 +64,11 @@ Komut satırı:
 
 ```text
 kare-cli plan "Gün batımında sahil, 8 saniye" -o sahil.kare
+kare-cli plan "Titanik olayını anlatan shorts videosu" -o titanik.kare
+kare-cli plan "İstanbul'un fethi" --web --voice tr --seconds 90 -o fetih.kare
+kare-cli plan "Make a short about the Apollo 11 mission" --voice en -o apollo.kare
+kare-cli research "Titanik"
+kare-cli voices
 kare-cli plan https://github.com/Hydra-Ai-tr/kare -o kare.kare
 kare-cli render --project kare.kare -o tanitim.mp4
 kare-cli render "Dikey tanıtım" -o tanitim.mp4 --seconds 10 --aspect 9:16
@@ -85,7 +109,7 @@ build\bin\kare.exe
 
 ## Gizlilik
 
-Çevrimdışı kurgu, müzik ve dışa aktarma ağ kullanmaz. Ağ yalnızca Ayarlar'dan açtığınız API ve yapıştırdığınız GitHub bağlantısı için kullanılır.
+Çevrimdışı kurgu, seslendirme, müzik ve dışa aktarma ağ kullanmaz. Ağ yalnızca Ayarlar'dan açtığınız API, yapıştırdığınız GitHub bağlantısı ve internet araştırması (Vikipedi ve Wikimedia Commons; yalnızca konu adı gönderilir) için kullanılır. İndirilen görseller `%APPDATA%\Kare\media` klasöründe tutulur.
 
 ## Lisans
 
@@ -107,11 +131,30 @@ Kare is a local video studio written in C++17. You give it a sentence, a list, o
 
 Kare is not a video diffusion model, and it does not download one. It makes motion graphics: type, color, light, camera moves, your own images, and music. You change the words, the timing, the order, and the look, then export again.
 
+## Researched, narrated Shorts
+
+Type `Make a short about the Titanic disaster`. Kare:
+
+1. Finds the topic on Wikipedia and reads the lead and the sections that tell the story.
+2. Downloads the article's photos from Wikimedia Commons, drops logos and flags, and matches a picture to every line.
+3. Writes the voice-over script (the API writes it when enabled, otherwise it is taken from the article).
+4. Narrates it in **English or Turkish** with the Windows speech voices and times each scene to the voice.
+5. Edits a 1080×1920 vertical cut: Ken Burns moves, blurred backdrops, word-by-word captions with a highlighted current word.
+6. Picks background music for the topic and ducks it under the voice.
+7. Puts sources and image licenses on the end card and in a `.credits.txt` next to the export.
+
+[![Titanic short example](docs/promo/titanik-shorts.jpg)](https://github.com/Hydra-Ai-tr/kare/releases/download/v0.3.0/titanic-shorts-en.mp4)
+
+*Made from one prompt with the offline planner: [English](https://github.com/Hydra-Ai-tr/kare/releases/download/v0.3.0/titanic-shorts-en.mp4) · [Türkçe](https://github.com/Hydra-Ai-tr/kare/releases/download/v0.3.0/titanik-shorts-tr.mp4)*
+
+The Create page has **Shorts**, **Research online**, and **Narration** options. Words such as `about`, `explain`, `history of`, and `who was` turn research on by themselves. Each scene's narration is editable in scene settings; voice, speed, and caption style are in the video settings. `kare-cli voices` lists installed voices; add more in Windows **Settings → Time & language → Speech**.
+
 ## What it does
 
 - Plans Turkish and English prompts offline (`8 seconds`, `9:16`, `title: "Hello"`, numbered lists, comma-separated clauses).
 - Paste a GitHub link and it reads the repository (README, languages, stars, build tools) and cuts a promo.
-- 11 layouts: hero, statement, list, stat, quote, split, terminal, bars, media, showcase, end card.
+- Researched, narrated, captioned Shorts and landscape documentaries (above).
+- 12 layouts: hero, statement, list, stat, quote, split, terminal, bars, media, showcase, documentary, end card.
 - 7 transitions: fade, slide, wipe, zoom, flash, glitch, cut.
 - Word-by-word text animation (rise, fade, type, reveal, spring) with `*highlight*` markup.
 - Generated soundtrack: ambient, pulse, drive, lofi. Whooshes on cuts, a riser and boom into the end card. Scenes snap to the beat.
@@ -124,7 +167,7 @@ Kare is not a video diffusion model, and it does not download one. It makes moti
 
 ## Install
 
-Download `kare-0.2.0-windows-x64.zip` from [Releases](https://github.com/Hydra-Ai-tr/kare/releases/latest) and unzip it. `kare.exe` is the app, `kare-cli.exe` is the command line. Windows 10 or newer.
+Download `kare-0.3.0-windows-x64.zip` from [Releases](https://github.com/Hydra-Ai-tr/kare/releases/latest) and unzip it. `kare.exe` is the app, `kare-cli.exe` is the command line. Windows 10 or newer.
 
 The build is not signed yet. If SmartScreen appears, choose **More info → Run anyway**.
 
@@ -138,6 +181,10 @@ Shortcuts: `Space` play, `←/→` scene, `S` split, `Ctrl+D` duplicate, `Delete
 
 ```text
 kare-cli plan "Night market, 6 seconds" -o market.kare
+kare-cli plan "Make a short about the Titanic disaster" -o titanic.kare
+kare-cli plan "History of the Eiffel Tower" --web --voice en --seconds 90 -o eiffel.kare
+kare-cli research "Apollo 11" --lang en
+kare-cli voices
 kare-cli plan https://github.com/owner/repo -o repo.kare
 kare-cli render --project repo.kare -o promo.mp4
 kare-cli frame "Hello" -o frame.png
@@ -175,7 +222,7 @@ build\bin\kare.exe
 
 ## Privacy
 
-Offline planning, music, and export do not use the network. The network is used only for the API you enable in Settings and for GitHub links you paste.
+Offline planning, narration, music, and export do not use the network. The network is used only for the API you enable in Settings, GitHub links you paste, and online research (Wikipedia and Wikimedia Commons; only the topic is sent). Downloaded pictures are kept in `%APPDATA%\Kare\media`.
 
 ## License
 

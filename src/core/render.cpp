@@ -9,6 +9,7 @@
 #include <unordered_map>
 
 #include "core/font.h"
+#include "core/tts.h"
 #include "core/utf8.h"
 
 #if defined(__GNUC__)
@@ -249,9 +250,38 @@ struct Level {
 
 struct Image {
     std::vector<Level> levels;
+    Level blur;
     int w() const { return levels.empty() ? 0 : levels[0].w; }
     int h() const { return levels.empty() ? 0 : levels[0].h; }
 };
+
+void box_blur(Level& L, int r) {
+    std::vector<uint8_t> tmp(L.px.size());
+    for (int pass = 0; pass < 3; pass++) {
+        for (int y = 0; y < L.h; y++)
+            for (int x = 0; x < L.w; x++)
+                for (int k = 0; k < 4; k++) {
+                    int sum = 0, n = 0;
+                    for (int d = -r; d <= r; d++) {
+                        int xx = std::clamp(x + d, 0, L.w - 1);
+                        sum += L.px[(static_cast<size_t>(y) * L.w + xx) * 4 + k];
+                        n++;
+                    }
+                    tmp[(static_cast<size_t>(y) * L.w + x) * 4 + k] = static_cast<uint8_t>(sum / n);
+                }
+        for (int y = 0; y < L.h; y++)
+            for (int x = 0; x < L.w; x++)
+                for (int k = 0; k < 4; k++) {
+                    int sum = 0, n = 0;
+                    for (int d = -r; d <= r; d++) {
+                        int yy = std::clamp(y + d, 0, L.h - 1);
+                        sum += tmp[(static_cast<size_t>(yy) * L.w + x) * 4 + k];
+                        n++;
+                    }
+                    L.px[(static_cast<size_t>(y) * L.w + x) * 4 + k] = static_cast<uint8_t>(sum / n);
+                }
+    }
+}
 
 Level half_level(const Level& s) {
     Level d;
@@ -293,6 +323,11 @@ std::shared_ptr<const Image> get_image(const std::string& path) {
             while (base.w > 2560 || base.h > 2560) base = half_level(base);
             img->levels.push_back(std::move(base));
             while (img->levels.back().w > 48 && img->levels.back().h > 48) img->levels.push_back(half_level(img->levels.back()));
+            for (const auto& L : img->levels) {
+                img->blur = L;
+                if (std::max(L.w, L.h) <= 120) break;
+            }
+            box_blur(img->blur, 3);
         }
         if (data) stbi_image_free(data);
     }
@@ -300,11 +335,8 @@ std::shared_ptr<const Image> get_image(const std::string& path) {
     return img;
 }
 
-void draw_image(Frame& f, const Image& im, float x, float y, float w, float h, float radius, float alpha) {
-    if (w < 1.f || h < 1.f || alpha <= 0.002f || im.levels.empty()) return;
-    size_t li = 0;
-    while (li + 1 < im.levels.size() && im.levels[li + 1].w >= w && im.levels[li + 1].h >= h) li++;
-    const Level& L = im.levels[li];
+void draw_level(Frame& f, const Level& L, float x, float y, float w, float h, float radius, float alpha) {
+    if (w < 1.f || h < 1.f || alpha <= 0.002f || L.px.empty()) return;
     float hw = w * 0.5f, hh = h * 0.5f, cx = x + hw, cy = y + hh;
     float r = std::min(radius, std::min(hw, hh));
     float sx = L.w / w, sy = L.h / h;
@@ -338,6 +370,13 @@ void draw_image(Frame& f, const Image& im, float x, float y, float w, float h, f
     }
 }
 
+void draw_image(Frame& f, const Image& im, float x, float y, float w, float h, float radius, float alpha) {
+    if (im.levels.empty()) return;
+    size_t li = 0;
+    while (li + 1 < im.levels.size() && im.levels[li + 1].w >= w && im.levels[li + 1].h >= h) li++;
+    draw_level(f, im.levels[li], x, y, w, h, radius, alpha);
+}
+
 // ---------------------------------------------------------------- text
 
 std::string upper_tr(const std::string& s) {
@@ -351,6 +390,16 @@ std::string upper_tr(const std::string& s) {
         else if (cp == 0xF6) cp = 0xD6;
         else if (cp == 0x15F) cp = 0x15E;
         else if (cp == 0xFC) cp = 0xDC;
+        out.push_back(cp);
+    }
+    return cps_utf8(out);
+}
+
+std::string upper_ascii(const std::string& s) {
+    std::vector<uint32_t> out;
+    for (uint32_t cp : utf8_cps(s)) {
+        if (cp >= 'a' && cp <= 'z') cp -= 32;
+        else if (cp >= 0xE0 && cp <= 0xFE && cp != 0xF7) cp -= 32;
         out.push_back(cp);
     }
     return cps_utf8(out);
@@ -676,9 +725,9 @@ struct Ctx {
     const Scene& s;
     Pal pal;
     int index = 0, count = 1;
-    float t = 0.f, ta = 0.f, dur = 1.f, T = 0.f;
+    float t = 0.f, ta = 0.f, dur = 1.f, T = 0.f, sec = 1.f;
     float S = 1.f, W = 0.f, H = 0.f;
-    bool portrait = false, square = false;
+    bool portrait = false, square = false, turkish = true;
     float sx = 0.f, sy = 0.f, sw = 0.f, sh = 0.f;
     float ox = 0.f, oy = 0.f;
     Cam cam;
@@ -702,7 +751,7 @@ void draw_kicker(Ctx& c, float x, float y, int align, float delay = 0.f) {
     if (c.s.kicker.empty()) return;
     int px = static_cast<int>(std::lround(17.f * c.S));
     int sp = static_cast<int>(std::lround(3.2f * c.S));
-    std::string up = upper_tr(c.s.kicker);
+    std::string up = c.turkish ? upper_tr(c.s.kicker) : upper_ascii(c.s.kicker);
     int tw = spaced_width(true, up, px, sp);
     float p = ease_out((c.ta - delay) / 0.6f);
     if (p <= 0.f) return;
@@ -1588,6 +1637,96 @@ void draw_showcase(Ctx& c, const Image& im) {
     draw_block(c.f, body, c.ta, x, y, 0, c.body, c.hi, 1.f, mb, c.shadow, c.S);
 }
 
+void dim(Frame& f, float k) {
+    int m = static_cast<int>(clamp01(k) * 256.f);
+    for (size_t i = 0; i < f.rgba.size(); i += 4) {
+        f.rgba[i] = static_cast<uint8_t>((f.rgba[i] * m) >> 8);
+        f.rgba[i + 1] = static_cast<uint8_t>((f.rgba[i + 1] * m) >> 8);
+        f.rgba[i + 2] = static_cast<uint8_t>((f.rgba[i + 2] * m) >> 8);
+    }
+}
+
+void darken_top(Frame& f, float reach, float strength) {
+    int rows = static_cast<int>(f.h * reach);
+    for (int y = 0; y < rows; y++) {
+        float a = (1.f - smoothstep(0.f, 1.f, static_cast<float>(y) / static_cast<float>(std::max(1, rows)))) * strength;
+        int m = static_cast<int>((1.f - a) * 256.f);
+        uint8_t* row = px_at(f, 0, y);
+        for (int x = 0; x < f.w; x++) {
+            uint8_t* p = row + x * 4;
+            p[0] = static_cast<uint8_t>((p[0] * m) >> 8);
+            p[1] = static_cast<uint8_t>((p[1] * m) >> 8);
+            p[2] = static_cast<uint8_t>((p[2] * m) >> 8);
+        }
+    }
+}
+
+// Documentary shot: slow Ken Burns move over the photo; photos that do not fill the frame sit on a blurred copy.
+void draw_story(Ctx& c, const Image& im) {
+    float ia = static_cast<float>(im.w()) / static_cast<float>(std::max(1, im.h()));
+    float fa = c.W / c.H;
+    float u = clamp01(c.t / std::max(0.1f, c.sec));
+    float kb = u * 0.8f + ease_in_out(u) * 0.2f;
+    int v = (c.index * 7 + 3) % 4;
+    bool zoom_in = v % 2 == 0;
+    float k = zoom_in ? 1.04f + 0.13f * kb : 1.17f - 0.13f * kb;
+    float dir = v == 1 ? -1.f : v == 3 ? 1.f : (c.index % 2 ? 0.5f : -0.5f);
+    float pan = dir * (kb - 0.5f);
+    bool contain = c.portrait ? ia > 0.78f : ia < fa * 0.72f;
+    if (contain) {
+        float bw = ia > fa ? c.H * ia : c.W, bh = ia > fa ? c.H : c.W / ia;
+        bw *= 1.12f + 0.05f * kb;
+        bh *= 1.12f + 0.05f * kb;
+        draw_level(c.f, im.blur, (c.W - bw) * 0.5f, (c.H - bh) * 0.5f, bw, bh, 0.f, 1.f);
+        dim(c.f, c.pal.light ? 0.62f : 0.5f);
+        float fw, fh, cx, cy;
+        if (c.portrait) {
+            fw = c.W * (zoom_in ? 1.0f + 0.10f * kb : 1.10f - 0.10f * kb);
+            fh = fw / ia;
+            if (fh > c.H * 0.62f) {
+                fh = c.H * 0.62f;
+                fw = fh * ia;
+            }
+            cx = c.W * 0.5f + pan * c.W * 0.06f;
+            cy = c.H * 0.42f;
+        } else {
+            fh = c.H * (0.86f + 0.06f * (zoom_in ? kb : 1.f - kb));
+            fw = fh * ia;
+            cx = c.W * 0.5f + pan * c.W * 0.03f;
+            cy = c.H * 0.5f;
+        }
+        float r = c.portrait ? 0.f : 16.f * c.S;
+        shadow_rrect(c.f, cx - fw * 0.5f, cy - fh * 0.5f + 18.f * c.S, fw, fh, r, 50.f * c.S, 0.55f);
+        draw_image(c.f, im, cx - fw * 0.5f, cy - fh * 0.5f, fw, fh, r, 1.f);
+    } else {
+        float dw = ia > fa ? c.H * ia : c.W, dh = ia > fa ? c.H : c.W / ia;
+        dw *= k;
+        dh *= k;
+        float spare_x = std::max(0.f, dw - c.W), spare_y = std::max(0.f, dh - c.H);
+        float x = (c.W - dw) * 0.5f + pan * spare_x * 0.8f;
+        float y = (c.H - dh) * 0.5f + (zoom_in ? -0.15f : 0.15f) * (kb - 0.5f) * spare_y;
+        draw_image(c.f, im, x, y, dw, dh, 0.f, 1.f);
+    }
+    darken_for_text(c.f, c.portrait ? 0.62f : 0.55f, 0.f);
+    bool head = !c.s.title.empty() || !c.s.kicker.empty();
+    if (head) darken_top(c.f, c.portrait ? 0.3f : 0.38f, 0.6f);
+    if (c.portrait) {
+        float y = c.H * 0.065f;
+        draw_kicker(c, c.W * 0.5f, y, 1, 0.1f);
+        y += kicker_h(c);
+        Block title = make_block(c.s.title, true, 64.f * c.S, c.sw, 3, 34.f * c.S, 1.08f);
+        Motion mt = motion_at(c, 0.15f);
+        draw_block(c.f, title, c.ta, c.W * 0.5f, y, 1, kWhite, c.pal.accent, 1.f, mt, 0.55f, c.S);
+    } else {
+        float y = c.sy * 0.7f;
+        draw_kicker(c, c.sx, y, 0, 0.1f);
+        y += kicker_h(c);
+        Block title = make_block(c.s.title, true, 50.f * c.S, c.sw * 0.7f, 2, 28.f * c.S, 1.08f);
+        Motion mt = motion_at(c, 0.15f);
+        draw_block(c.f, title, c.ta, c.sx, y, 0, kWhite, c.pal.accent, 1.f, mt, 0.55f, c.S);
+    }
+}
+
 void draw_end(Ctx& c) {
     float maxw = c.sw * 0.84f;
     Block title = make_block(c.s.title, true, (c.portrait ? 50.f : 54.f) * c.S, maxw - 70.f * c.S, 2, 26.f * c.S);
@@ -1627,6 +1766,22 @@ std::string style_of(const Storyboard& b, int i) {
 
 bool letterboxed(const Storyboard& b) { return b.style == "ember" && b.width > b.height; }
 
+// Decides whether "i" uppercases to "İ": the narration voice wins, otherwise any Turkish letter on screen.
+bool turkish_board(const Storyboard& b) {
+    if (b.voice != "none" && !b.voice.empty()) return voice_language(b.voice) == "tr";
+    auto has = [](const std::string& s) {
+        for (uint32_t cp : utf8_cps(s))
+            if (cp == 0xE7 || cp == 0xC7 || cp == 0x11F || cp == 0x11E || cp == 0x131 || cp == 0x130 || cp == 0xF6 ||
+                cp == 0xD6 || cp == 0x15F || cp == 0x15E || cp == 0xFC || cp == 0xDC)
+                return true;
+        return false;
+    };
+    if (has(b.title) || has(b.prompt)) return true;
+    for (const auto& s : b.scenes)
+        if (has(s.title) || has(s.text) || has(s.kicker)) return true;
+    return false;
+}
+
 void render_scene(const Storyboard& b, int index, double local, double T, Frame& out) {
     const int W = b.width, H = b.height;
     out.w = W;
@@ -1648,6 +1803,8 @@ void render_scene(const Storyboard& b, int index, double local, double T, Frame&
     float tscale = std::clamp(dur / 3.2f, 0.55f, 1.f);
     c.ta = c.t / tscale;
     c.dur = dur / tscale;
+    c.sec = dur;
+    c.turkish = turkish_board(b);
     c.T = static_cast<float>(T);
     c.S = S;
     c.W = static_cast<float>(W);
@@ -1671,10 +1828,11 @@ void render_scene(const Storyboard& b, int index, double local, double T, Frame&
     c.shadow = pal.light ? 0.f : 0.35f;
 
     std::string layout = resolve_layout(b, index);
-    if (layout == "media" || layout == "showcase") {
+    if (layout == "media" || layout == "showcase" || layout == "story") {
         auto im = get_image(s.image);
         if (im && !im->levels.empty()) {
             if (layout == "media") draw_media(c, *im);
+            else if (layout == "story") draw_story(c, *im);
             else draw_showcase(c, *im);
             return;
         }
@@ -1867,6 +2025,152 @@ void finish(const Storyboard& b, Frame& f, double t, double total, const Pal& pa
     }
 }
 
+// ---------------------------------------------------------------- captions
+
+std::string caption_mode(const Storyboard& b, int index) {
+    const Scene& s = b.scenes[static_cast<size_t>(index)];
+    if (s.narration.empty() || b.voice == "none" || b.captions == "none") return "";
+    bool portrait = b.height > b.width * 1.2;
+    if (b.captions == "auto") return resolve_layout(b, index) == "story" ? (portrait ? "words" : "line") : "";
+    return b.captions;
+}
+
+struct TimedWord {
+    std::string s;
+    double start = 0, end = 0;
+};
+
+std::vector<TimedWord> caption_words(const Storyboard& b, int index) {
+    std::vector<TimedWord> out;
+    auto clip = scene_voice(b, index, false);
+    if (clip && !clip->words.empty()) {
+        for (const auto& w : clip->words) out.push_back({w.text, w.start, w.end});
+        return out;
+    }
+    // No voice installed for this board: spread the words over the scene so captions still read naturally.
+    const Scene& s = b.scenes[static_cast<size_t>(index)];
+    std::vector<std::string> words;
+    std::string cur;
+    for (char ch : speakable(s.narration)) {
+        if (ch == ' ') {
+            if (!cur.empty()) words.push_back(cur);
+            cur.clear();
+        } else {
+            cur += ch;
+        }
+    }
+    if (!cur.empty()) words.push_back(cur);
+    if (words.empty()) return out;
+    double weight = 0;
+    for (const auto& w : words) weight += utf8_cps(w).size() + 2.0;
+    double span = std::max(0.6, s.seconds - kVoiceLead - 0.4), at = 0;
+    for (const auto& w : words) {
+        double d = span * (utf8_cps(w).size() + 2.0) / weight;
+        out.push_back({w, at, at + d});
+        at += d;
+    }
+    return out;
+}
+
+std::vector<std::pair<int, int>> caption_chunks(const std::vector<TimedWord>& words, bool word_mode) {
+    std::vector<std::pair<int, int>> out;
+    const int max_words = word_mode ? 3 : 8;
+    const size_t max_chars = word_mode ? 16 : 42;
+    int first = 0, count = 0;
+    size_t chars = 0;
+    for (int i = 0; i < static_cast<int>(words.size()); i++) {
+        size_t n = utf8_cps(words[static_cast<size_t>(i)].s).size();
+        bool gap = count > 0 && words[static_cast<size_t>(i)].start - words[static_cast<size_t>(i) - 1].end > 0.45;
+        if (count > 0 && (count >= max_words || chars + n + 1 > max_chars || gap)) {
+            out.push_back({first, i});
+            first = i;
+            count = 0;
+            chars = 0;
+        }
+        count++;
+        chars += n + 1;
+        const std::string& s = words[static_cast<size_t>(i)].s;
+        char last = s.empty() ? ' ' : s.back();
+        bool stop = last == '.' || last == '!' || last == '?' || last == ':' || last == ';';
+        if (stop || (word_mode && last == ',')) {
+            out.push_back({first, i + 1});
+            first = i + 1;
+            count = 0;
+            chars = 0;
+        }
+    }
+    if (count > 0) out.push_back({first, static_cast<int>(words.size())});
+    return out;
+}
+
+void draw_captions(const Storyboard& b, int index, double local, Frame& f) {
+    std::string mode = caption_mode(b, index);
+    if (mode.empty()) return;
+    auto words = caption_words(b, index);
+    if (words.empty()) return;
+    const bool wm = mode == "words";
+    double lt = local - kVoiceLead;
+    auto chunks = caption_chunks(words, wm);
+    int ci = -1;
+    for (int i = 0; i < static_cast<int>(chunks.size()); i++)
+        if (words[static_cast<size_t>(chunks[static_cast<size_t>(i)].first)].start <= lt + 0.04) ci = i;
+    if (ci < 0) return;
+    auto [a, e] = chunks[static_cast<size_t>(ci)];
+    double until = ci + 1 < static_cast<int>(chunks.size())
+                       ? words[static_cast<size_t>(chunks[static_cast<size_t>(ci) + 1].first)].start
+                       : words.back().end + 0.5;
+    if (lt > until) return;
+    int cur = a;
+    for (int i = a; i < e; i++)
+        if (words[static_cast<size_t>(i)].start <= lt + 0.02) cur = i;
+
+    float W = static_cast<float>(f.w), H = static_cast<float>(f.h);
+    float S = std::min(W, H) / 720.f;
+    bool portrait = H > W * 1.2f;
+    const bool turkish = turkish_board(b);
+    std::string text;
+    for (int i = a; i < e; i++) {
+        if (i > a) text += ' ';
+        const std::string& w = words[static_cast<size_t>(i)].s;
+        text += wm ? (turkish ? upper_tr(w) : upper_ascii(w)) : w;
+    }
+    float px = wm ? (portrait ? 62.f : 52.f) * S : (portrait ? 34.f : 30.f) * S;
+    Block blk = make_block(text, true, px, W * (wm ? 0.86f : 0.8f), 2, px * 0.6f, 1.12f);
+    if (blk.lines.empty()) return;
+    float top = wm ? H * (portrait ? 0.70f : 0.72f) - blk.height * 0.5f : H * (portrait ? 0.84f : 0.9f) - blk.height;
+    float alpha = static_cast<float>(clamp01(static_cast<float>((lt - words[static_cast<size_t>(a)].start + 0.04) / 0.1)));
+    float r = std::max(2.f, blk.px * (wm ? 0.085f : 0.065f));
+    const Rgb yellow{255, 216, 77};
+    int k = 0;
+    for (size_t li = 0; li < blk.lines.size(); li++) {
+        const LineT& L = blk.lines[li];
+        int x = static_cast<int>(std::lround(W * 0.5f - L.width * 0.5f));
+        int line_top = static_cast<int>(std::lround(top + static_cast<float>(li) * blk.line_h));
+        for (int wi = L.first; wi < L.last; wi++) {
+            const WordT& w = blk.words[static_cast<size_t>(wi)];
+            if (w.br) continue;
+            int gi = std::min(a + k, e - 1);
+            bool now = gi == cur;
+            float dy = 0.f;
+            if (wm && now) {
+                float p = static_cast<float>((lt - words[static_cast<size_t>(gi)].start) / 0.14);
+                dy = -(1.f - ease_out(p)) * 0.08f * blk.px;
+            }
+            int ty = line_top + static_cast<int>(std::lround(dy));
+            draw_word(f, true, w.s, blk.px, x, ty + static_cast<int>(r * 1.3f), kBlack, alpha * 0.45f);
+            for (int d = 0; d < 12; d++) {
+                float ang = static_cast<float>(d) * kPi / 6.f;
+                draw_word(f, true, w.s, blk.px, x + static_cast<int>(std::lround(std::cos(ang) * r)),
+                          ty + static_cast<int>(std::lround(std::sin(ang) * r)), kBlack, alpha * 0.85f);
+            }
+            Rgb ink = now ? yellow : (wm || gi < cur ? kWhite : Rgb{214, 218, 226});
+            draw_word(f, true, w.s, blk.px, x, ty, ink, alpha);
+            x += w.w + blk.space;
+            k++;
+        }
+    }
+}
+
 }  // namespace
 
 std::string resolve_layout(const Storyboard& b, int index) {
@@ -1874,6 +2178,7 @@ std::string resolve_layout(const Storyboard& b, int index) {
     const Scene& s = b.scenes[static_cast<size_t>(index)];
     if (!s.layout.empty() && s.layout != "auto") return s.layout;
     int n = static_cast<int>(b.scenes.size());
+    if (!s.image.empty() && !s.narration.empty() && s.text.empty()) return "story";
     if (!s.image.empty()) return utf8_cps(s.title).size() + utf8_cps(s.text).size() < 70 ? "media" : "showcase";
     auto lines = text_lines(s.text);
     if (lines.size() >= 2) {
@@ -1981,6 +2286,7 @@ void render_frame(const Storyboard& board, double time_sec, Frame& out) {
     } else {
         render_scene(b, index, local, t, out);
     }
+    draw_captions(b, index, local, out);
     finish(b, out, t, total, pal);
 }
 

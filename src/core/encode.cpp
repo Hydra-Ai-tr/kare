@@ -12,6 +12,7 @@
 #include "core/audio.h"
 #include "core/font.h"
 #include "core/render.h"
+#include "core/tts.h"
 #include "core/utf8.h"
 
 #if defined(__GNUC__)
@@ -542,10 +543,7 @@ std::string write_mp4(const Storyboard& board, const std::string& path, const Pr
 }
 #endif
 
-}  // namespace
-
-std::string encode_video(const Storyboard& board, const std::string& path, const Progress& progress) {
-    if (path.empty()) return "output path is empty";
+std::string encode_any(const Storyboard& board, const std::string& path, const Progress& progress) {
     if (ends_with_ci(path, ".avi")) return write_avi(board, path, progress);
 #ifdef _WIN32
     if (ends_with_ci(path, ".mp4")) {
@@ -560,8 +558,23 @@ std::string encode_video(const Storyboard& board, const std::string& path, const
 #endif
 }
 
+}  // namespace
+
+std::string encode_video(const Storyboard& board, const std::string& path, const Progress& progress) {
+    if (path.empty()) return "output path is empty";
+    prepare_voices(board);
+    std::string err = encode_any(board, path, progress);
+    if (err.empty() && !board.credits.empty()) {
+        auto dot = path.find_last_of('.');
+        std::string credits = path.substr(0, dot) + ".credits.txt";
+        write_bytes(credits, board.credits.data(), board.credits.size());
+    }
+    return err;
+}
+
 bool write_preview_png(const std::string& path, const Storyboard& board, double time_sec, std::string& err) {
     if (!fonts_load(err)) return false;
+    prepare_voices(board);
     Frame frame;
     render_frame(board, time_sec, frame);
     return write_png(path, frame.w, frame.h, frame.rgba.data(), err);

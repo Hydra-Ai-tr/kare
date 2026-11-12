@@ -22,9 +22,37 @@ bool listed(const std::vector<std::string>& ids, const std::string& v) {
 }  // namespace
 
 const std::vector<std::string>& layout_ids() {
-    static const std::vector<std::string> ids = {"auto", "hero",     "statement", "list",  "stat",     "quote",
-                                                 "split", "terminal", "bars",      "media", "showcase", "end"};
+    static const std::vector<std::string> ids = {"auto",     "hero", "statement", "list",     "stat", "quote", "split",
+                                                 "terminal", "bars", "media",     "showcase", "story", "end"};
     return ids;
+}
+
+const std::vector<std::string>& caption_ids() {
+    static const std::vector<std::string> ids = {"auto", "none", "words", "line"};
+    return ids;
+}
+
+// Spoken text keeps its punctuation: a trailing comma or period changes the intonation.
+static std::string squash_spaces(const std::string& s) {
+    std::string out;
+    bool space = false;
+    for (char ch : s) {
+        if (ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t') {
+            space = !out.empty();
+            continue;
+        }
+        if (space) out.push_back(' ');
+        space = false;
+        out.push_back(ch);
+    }
+    return out;
+}
+
+bool has_narration(const Storyboard& board) {
+    if (board.voice == "none" || board.voice.empty()) return false;
+    for (const auto& s : board.scenes)
+        if (!s.narration.empty()) return true;
+    return false;
 }
 
 const std::vector<std::string>& transition_ids() {
@@ -93,6 +121,9 @@ void normalize(Storyboard& board) {
     if (!valid_size(board.width, board.height)) apply_aspect_size(board);
     if (!known_style(board.style)) board.style = "ember";
     if (!known_music(board.music)) board.music = "auto";
+    if (board.voice.empty()) board.voice = "none";
+    board.voice_rate = std::clamp(board.voice_rate, -5, 6);
+    if (!listed(caption_ids(), board.captions)) board.captions = "auto";
     if (board.scenes.size() > static_cast<size_t>(kMaxScenes)) board.scenes.resize(static_cast<size_t>(kMaxScenes));
     if (board.scenes.empty()) {
         Scene s;
@@ -109,12 +140,13 @@ void normalize(Storyboard& board) {
         if (!known_anim(s.anim)) s.anim = "auto";
         s.kicker = tidy(s.kicker);
         if (s.seconds < 0.4) s.seconds = 0.4;
-        if (s.seconds > 20) s.seconds = 20;
+        if (s.seconds > kMaxSceneSeconds) s.seconds = kMaxSceneSeconds;
         s.title = tidy(s.title);
         s.text = tidy_lines(s.text);
+        s.narration = squash_spaces(s.narration);
     }
     double t = total_seconds(board);
-    if (t > 120.0) scale_duration(board, 120.0);
+    if (t > kMaxTotalSeconds) scale_duration(board, kMaxTotalSeconds);
     if (board.title.empty()) {
         for (const auto& s : board.scenes) {
             if (!s.title.empty()) {
@@ -170,6 +202,10 @@ std::string story_to_json(const Storyboard& board) {
     j.put("mark", Json::boolv(board.mark));
     j.put("music", Json::strv(board.music));
     j.put("grain", Json::boolv(board.grain));
+    j.put("voice", Json::strv(board.voice));
+    j.put("voice_rate", Json::numv(board.voice_rate));
+    j.put("captions", Json::strv(board.captions));
+    if (!board.credits.empty()) j.put("credits", Json::strv(board.credits));
     Json scenes = Json::arr();
     for (const auto& s : board.scenes) {
         Json o = Json::obj();
@@ -183,6 +219,7 @@ std::string story_to_json(const Storyboard& board) {
         o.put("anim", Json::strv(s.anim));
         if (!s.kicker.empty()) o.put("kicker", Json::strv(s.kicker));
         if (!s.image.empty()) o.put("image", Json::strv(s.image));
+        if (!s.narration.empty()) o.put("narration", Json::strv(s.narration));
         scenes.a.push_back(std::move(o));
     }
     j.put("scenes", std::move(scenes));
@@ -207,6 +244,10 @@ bool story_from_json(const std::string& text, Storyboard& board, std::string& er
     b.mark = j.boolean("mark", true);
     b.music = j.str("music", "auto");
     b.grain = j.boolean("grain", true);
+    b.voice = j.str("voice", "none");
+    b.voice_rate = static_cast<int>(j.num("voice_rate", 0));
+    b.captions = j.str("captions", "auto");
+    b.credits = j.str("credits");
     const Json* scenes = j.field("scenes");
     if (scenes && scenes->type == Json::Arr) {
         for (const auto& item : scenes->a) {
@@ -222,7 +263,8 @@ bool story_from_json(const std::string& text, Storyboard& board, std::string& er
             s.anim = item.str("anim", "auto");
             s.kicker = item.str("kicker");
             s.image = item.str("image");
-            if (s.title.empty() && s.text.empty() && s.image.empty()) continue;
+            s.narration = item.str("narration");
+            if (s.title.empty() && s.text.empty() && s.image.empty() && s.narration.empty()) continue;
             b.scenes.push_back(std::move(s));
         }
     }

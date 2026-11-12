@@ -30,7 +30,9 @@
 #include "core/github.h"
 #include "core/render.h"
 #include "core/story.h"
+#include "core/tts.h"
 #include "core/utf8.h"
+#include "core/web.h"
 
 #include <GLFW/glfw3.h>
 #ifdef _WIN32
@@ -159,7 +161,10 @@ const Opt kLayoutOpts[] = {{"auto", "Otomatik", "Auto"},       {"hero", "Kapak",
                            {"stat", "Sayı", "Stat"},           {"quote", "Alıntı", "Quote"},
                            {"split", "İki sütun", "Split"},    {"terminal", "Terminal", "Terminal"},
                            {"bars", "Çubuk grafik", "Bar chart"}, {"media", "Görsel", "Media"},
-                           {"showcase", "Vitrin", "Showcase"}, {"end", "Kapanış", "End card"}};
+                           {"showcase", "Vitrin", "Showcase"}, {"story", "Belgesel", "Documentary"},
+                           {"end", "Kapanış", "End card"}};
+const Opt kCaptionOpts[] = {{"auto", "Otomatik", "Auto"}, {"words", "Kelime kelime", "Word by word"},
+                            {"line", "Alt yazı", "Subtitle line"}, {"none", "Kapalı", "Off"}};
 const Opt kTransitionOpts[] = {{"auto", "Otomatik", "Auto"}, {"fade", "Çapraz geçiş", "Crossfade"}, {"slide", "Kaydırma", "Slide"},
                                {"wipe", "Silme", "Wipe"},    {"zoom", "Yakınlaşma", "Zoom"},       {"flash", "Flaş", "Flash"},
                                {"glitch", "Glitch", "Glitch"}, {"cut", "Kesme", "Cut"}};
@@ -201,6 +206,11 @@ struct App {
     int seconds_i = 0;
     bool advanced = true;
     bool plan_api = false;
+    bool shorts = false;
+    bool web = false;
+    int voice_i = 0;  // auto, off, then installed voices
+    std::vector<VoiceInfo> voices;
+    std::string plan_note;
 
     Storyboard board;
     bool has_board = false;
@@ -1343,6 +1353,7 @@ void sync_audio(App& app) {
             app.track_serial = app.pending_serial;
             app.track_ready = false;
             app.peaks = audio_peaks(app.track, 1600);
+            app.shown_serial = -1;  // the voice is spoken now, so captions can use real word timings
         }
     }
     bool fresh = app.has_board && app.track_serial == app.serial && !app.track.empty();
@@ -1566,9 +1577,23 @@ void start_plan(App& app) {
     in.api_key = app.cfg.api_key;
     in.api_model = app.cfg.api_model;
     in.github_token = app.cfg.github_token;
+    in.shorts = app.shorts;
+    in.web = app.web ? 1 : 0;
+    if (app.voice_i == 1) in.voice = "none";
+    else if (app.voice_i >= 2 && app.voice_i - 2 < static_cast<int>(app.voices.size())) in.voice = app.voices[static_cast<size_t>(app.voice_i - 2)].name;
+    in.note = [&app](const std::string& m) {
+        std::lock_guard<std::mutex> lock(app.mu);
+        app.plan_note = m;
+    };
+    {
+        std::lock_guard<std::mutex> lock(app.mu);
+        app.plan_note.clear();
+    }
     std::string owner, repo;
     if (find_github_repo(app.prompt, owner, repo))
         app.status = std::string(tr(app.cfg, "GitHub projesi inceleniyor: ", "Inspecting GitHub project: ")) + owner + "/" + repo;
+    else if (app.web || wants_research(app.prompt))
+        app.status = std::string(tr(app.cfg, "İnternette araştırılıyor: ", "Researching online: ")) + research_query(app.prompt);
     else
         app.status = tr(app.cfg, "Kurgu hazırlanıyor...", "Building the storyboard...");
     app.planning = true;
@@ -1593,8 +1618,11 @@ void take_pending(App& app) {
         app.plan_ready = false;
     }
     Storyboard board = std::move(result.board);
-    board.fps = kFpsOpt[app.fps_i];
-    apply_res(board, app.res_i);
+    // Researched and narrated videos come out at 1080p/30 sized for their platform; others follow the form.
+    if (result.source.empty() && !has_narration(board)) {
+        board.fps = kFpsOpt[app.fps_i];
+        apply_res(board, app.res_i);
+    }
     normalize(board);
     set_board(app, std::move(board));
     app.project_path.clear();
@@ -1603,6 +1631,9 @@ void take_pending(App& app) {
     app.last_repo_note = result.repo_note;
     std::string msg;
     if (!result.repo.empty()) msg = std::string(tr(app.cfg, "GitHub projesi incelendi: ", "GitHub project inspected: ")) + result.repo;
+    else if (!result.source.empty())
+        msg = std::string(tr(app.cfg, "Araştırma tamam: ", "Research done: ")) + app.board.title + "  ·  " +
+              std::to_string(app.board.scenes.size()) + tr(app.cfg, " sahne", " scenes");
     else if (result.from_api) msg = tr(app.cfg, "API kurgusu hazır.", "API storyboard is ready.");
     else msg = tr(app.cfg, "Yerel kurgu hazır.", "Local storyboard is ready.");
     if (!result.warning.empty()) msg += "  ·  " + result.warning;
@@ -1935,9 +1966,14 @@ void draw_statusbar(App& app, ImVec2 o, float W, float H, float SB) {
         draw_text(dl, F.small, ImVec2(bx0 - P(12) - lw, cy - F.small->FontSize * 0.5f), kSoft, label);
         right = bx0 - P(24) - lw;
     } else if (app.planning) {
-        const char* label = tr(app.cfg, "Kurgu hazırlanıyor...", "Building storyboard...");
-        float lw = text_size(F.small, label).x;
-        draw_text(dl, F.small, ImVec2(right - lw, cy - F.small->FontSize * 0.5f), kSoft, label);
+        std::string label;
+        {
+            std::lock_guard<std::mutex> lock(app.mu);
+            label = app.plan_note;
+        }
+        if (label.empty()) label = tr(app.cfg, "Kurgu hazırlanıyor...", "Building storyboard...");
+        float lw = text_size(F.small, label.c_str()).x;
+        draw_text(dl, F.small, ImVec2(right - lw, cy - F.small->FontSize * 0.5f), kSoft, label.c_str());
         spinner(dl, ImVec2(right - lw - P(14), cy), P(6), kAccent);
         right -= lw + P(30);
     }
@@ -2374,7 +2410,7 @@ void draw_ai_panel(App& app) {
         draw_text(dl, F.small, pmin + ImVec2(P(10), P(9)), kDim,
                   tr(app.cfg, "Bir sahne anlat ya da GitHub bağlantısı yapıştır", "Describe a scene or paste a GitHub link"));
         draw_text(dl, F.small, pmin + ImVec2(P(10), P(9) + F.small->FontSize * 1.4f), kDim,
-                  tr(app.cfg, "Örnek: gün batımında sahil, 8 saniye", "Example: sunset shore, 8 seconds"));
+                  tr(app.cfg, "Örnek: Titanik olayını anlatan shorts videosu", "Example: a short explaining the Titanic disaster"));
     }
     std::string owner, repo;
     if (find_github_repo(app.prompt, owner, repo)) {
@@ -2388,6 +2424,27 @@ void draw_ai_panel(App& app) {
         ImGui::PushID(i);
         if (wrap_chip("s", tr(app.cfg, kStyles[i].tr, kStyles[i].en), app.style_i == i, used, w, style_icons[i])) app.style_i = i;
         ImGui::PopID();
+    }
+    ImGui::Dummy(ImVec2(0.f, P(6)));
+    if (toggle("shorts", tr(app.cfg, "Shorts  ·  dikey 9:16, 1080p", "Shorts  ·  vertical 9:16, 1080p"), app.shorts, w))
+        app.shorts = !app.shorts;
+    if (toggle("web", tr(app.cfg, "İnternetten araştır  ·  Vikipedi + görseller", "Research online  ·  Wikipedia + images"), app.web, w))
+        app.web = !app.web;
+    {
+        ImGui::PushFont(F.small);
+        float cw = w * 0.56f;
+        std::vector<std::string> voices = {tr(app.cfg, "Otomatik", "Auto"), tr(app.cfg, "Kapalı", "Off")};
+        for (const auto& v : app.voices) {
+            std::string lang = v.lang == "tr" ? tr(app.cfg, "Türkçe", "Turkish")
+                               : v.lang == "en" ? tr(app.cfg, "İngilizce", "English")
+                                                : (v.lang.empty() ? "?" : v.lang);
+            std::string name = v.name;
+            if (name.rfind("Microsoft ", 0) == 0) name = name.substr(10);
+            voices.push_back(lang + "  \xC2\xB7  " + name);
+        }
+        row_label(tr(app.cfg, "Seslendirme", "Narration"), w, cw);
+        combo("##voice", app.voice_i, voices, cw);
+        ImGui::PopFont();
     }
     ImGui::Dummy(ImVec2(0.f, P(8)));
 
@@ -2439,8 +2496,10 @@ void draw_ai_panel(App& app) {
                ImVec2(w, P(46)), kGlow, !app.exporting, busy))
         start_plan(app);
     ImGui::Dummy(ImVec2(0.f, P(6)));
-    caption(tr(app.cfg, "Ctrl+Enter ile de oluşturabilirsin. Bir GitHub bağlantısı yapıştırırsan Kare depoyu, README'yi ve dilleri inceleyip tanıtım videosu kurar.",
-               "Ctrl+Enter also works. Paste a GitHub link and Kare reads the repo, README and languages, then builds a promo video."),
+    caption(tr(app.cfg, "Ctrl+Enter ile de oluşturabilirsin. \"Titanik'i anlatan shorts\" gibi bir konu yazarsan Kare internetten araştırır, "
+                        "görselleri indirir, seslendirir, alt yazı ve müzikle kurgular. GitHub bağlantısı yapıştırırsan depodan tanıtım videosu kurar.",
+               "Ctrl+Enter also works. Ask for a topic such as \"a short about the Titanic\" and Kare researches it online, downloads "
+               "pictures, narrates it and edits it with captions and music. Paste a GitHub link for a project promo."),
             w);
     if (!app.last_repo.empty() && app.has_board) {
         ImGui::Dummy(ImVec2(0.f, P(8)));
@@ -2497,6 +2556,15 @@ void draw_scene_settings(App& app) {
     ImGui::SetNextItemWidth(w);
     if (ImGui::InputTextWithHint("##sk", tr(app.cfg, "örn. Özellikler", "e.g. Features"), &s.kicker)) touch(app);
     pop_field();
+    caption(tr(app.cfg, "Seslendirme metni  (anlatıcının bu sahnede söyleyeceği)", "Narration  (what the narrator says in this scene)"));
+    push_field();
+    if (ImGui::InputTextMultiline("##sn", &s.narration, ImVec2(w, P(64)))) touch(app);
+    bool narration_done = ImGui::IsItemDeactivatedAfterEdit();
+    pop_field();
+    if (narration_done && app.board.voice != "none" && !s.narration.empty()) {
+        fit_to_voice(app.board, app.selected);
+        touch(app);
+    }
 
     ImGui::Dummy(ImVec2(0.f, P(2)));
     ImGui::PushFont(F.small);
@@ -2568,7 +2636,7 @@ void draw_scene_settings(App& app) {
     ImGui::PushStyleColor(ImGuiCol_SliderGrab, v4(kAccent));
     ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, v4(kAccent));
     ImGui::SetNextItemWidth(w);
-    if (ImGui::SliderFloat("##ss", &sec, 0.4f, 20.f, app.cfg.lang == "en" ? "%.1f s" : "%.1f sn")) {
+    if (ImGui::SliderFloat("##ss", &sec, 0.4f, static_cast<float>(kMaxSceneSeconds), app.cfg.lang == "en" ? "%.1f s" : "%.1f sn")) {
         s.seconds = sec;
         touch(app);
     }
@@ -2635,7 +2703,7 @@ void draw_scene_settings(App& app) {
     pop_field();
     ImGui::SameLine(0.f, P(6));
     if (button("fitb", 0, tr(app.cfg, "Dağıt", "Fit"), ImVec2(cw * 0.55f - P(6), P(30)), kOutline)) {
-        scale_duration(app.board, std::clamp(app.fit_seconds, 1.f, 120.f));
+        scale_duration(app.board, std::clamp(app.fit_seconds, 1.f, static_cast<float>(kMaxTotalSeconds)));
         normalize(app.board);
         touch(app);
     }
@@ -2672,7 +2740,9 @@ void draw_scene_settings(App& app) {
     {
         bool silent = resolve_music(app.board) == "none";
         char info[96];
-        if (silent)
+        if (silent && has_narration(app.board))
+            std::snprintf(info, sizeof info, "%s", tr(app.cfg, "Müzik yok, yalnızca seslendirme.", "No music, narration only."));
+        else if (silent)
             std::snprintf(info, sizeof info, "%s", tr(app.cfg, "Bu video sessiz dışa aktarılır.", "This video exports without sound."));
         else
             std::snprintf(info, sizeof info, tr(app.cfg, "%.0f BPM  ·  geçişlerde whoosh, kapanışta riser", "%.0f BPM  ·  whooshes on cuts, riser before the end"),
@@ -2685,7 +2755,78 @@ void draw_scene_settings(App& app) {
             touch(app);
         }
         ImGui::SameLine(0.f, P(8));
-        if (button("wav", ic::file_audio, tr(app.cfg, "WAV kaydet", "Save WAV"), ImVec2(bw2, P(34)), kOutline, !silent)) save_soundtrack(app);
+        if (button("wav", ic::file_audio, tr(app.cfg, "WAV kaydet", "Save WAV"), ImVec2(bw2, P(34)), kOutline,
+                   !silent || has_narration(app.board)))
+            save_soundtrack(app);
+    }
+
+    divider(w);
+    section(tr(app.cfg, "Seslendirme", "Narration"));
+    ImGui::PushFont(F.small);
+    {
+        float vw = w * 0.56f;
+        std::vector<std::string> items = {tr(app.cfg, "Kapalı", "Off")};
+        std::vector<std::string> ids = {"none"};
+        int vi = 0;
+        for (const auto& v : app.voices) {
+            std::string name = v.name;
+            if (name.rfind("Microsoft ", 0) == 0) name = name.substr(10);
+            items.push_back((v.lang.empty() ? std::string("?") : v.lang) + "  \xC2\xB7  " + name);
+            ids.push_back(v.name);
+        }
+        for (size_t k = 1; k < ids.size(); k++) {
+            const VoiceInfo& v = app.voices[k - 1];
+            if (app.board.voice == v.name || (app.board.voice == v.lang && vi == 0)) vi = static_cast<int>(k);
+        }
+        row_label(tr(app.cfg, "Ses", "Voice"), w, vw);
+        if (combo("##bvoice", vi, items, vw)) {
+            app.board.voice = ids[static_cast<size_t>(vi)];
+            if (app.board.voice != "none") fit_to_voice(app.board);
+            touch(app);
+        }
+        bool on = app.board.voice != "none";
+        int rate = app.board.voice_rate;
+        row_label(tr(app.cfg, "Hız", "Speed"), w, vw);
+        push_field();
+        ImGui::SetNextItemWidth(vw);
+        ImGui::SliderInt("##vrate", &rate, -5, 6, rate > 0 ? "+%d" : "%d");
+        bool rate_done = ImGui::IsItemDeactivatedAfterEdit();
+        pop_field();
+        if (rate != app.board.voice_rate) {
+            app.board.voice_rate = rate;
+            touch(app);
+        }
+        if (rate_done && on) {
+            fit_to_voice(app.board);
+            touch(app);
+        }
+        int ci = opt_index(kCaptionOpts, app.board.captions);
+        std::vector<std::string> caps;
+        for (const auto& o : kCaptionOpts) caps.push_back(tr(app.cfg, o.tr, o.en));
+        row_label(tr(app.cfg, "Alt yazı", "Captions"), w, vw);
+        if (combo("##bcaps", ci, caps, vw)) {
+            app.board.captions = kCaptionOpts[ci].id;
+            touch(app);
+        }
+        ImGui::Dummy(ImVec2(0.f, P(2)));
+        if (button("vfit", ic::timer, tr(app.cfg, "Süreleri sese uydur", "Fit scenes to the voice"), ImVec2(w, P(34)), kOutline,
+                   on && has_narration(app.board))) {
+            fit_to_voice(app.board);
+            touch(app);
+        }
+    }
+    ImGui::PopFont();
+    if (app.voices.empty())
+        caption(tr(app.cfg, "Bu bilgisayarda yüklü konuşma sesi bulunamadı (Ayarlar > Zaman ve dil > Konuşma).",
+                   "No speech voices are installed (Settings > Time & language > Speech)."),
+                w);
+    if (!app.board.credits.empty()) {
+        ImGui::Dummy(ImVec2(0.f, P(4)));
+        caption(tr(app.cfg, "Kaynaklar ve lisanslar  (dışa aktarınca .credits.txt olarak yanına yazılır)",
+                   "Sources and licenses  (written next to the export as .credits.txt)"));
+        push_field();
+        ImGui::InputTextMultiline("##credits", &app.board.credits, ImVec2(w, P(90)), ImGuiInputTextFlags_ReadOnly);
+        pop_field();
     }
 
     divider(w);
@@ -2995,7 +3136,9 @@ void draw_timeline(App& app, ImVec2 a, ImVec2 b) {
             bool shot = ImGui::IsItemHovered();
             dl->AddRectFilled(sa, sb2, with_alpha(kAccent, sel ? 40 : shot ? 26 : 14), P(5));
             dl->AddRect(sa, sb2, with_alpha(kAccent, sel ? 220 : 70), P(5));
-            std::string cap = std::string(I(ic::type)) + "  " + (s.title.empty() ? s.text : s.title);
+            std::string cap = !s.narration.empty() && app.board.voice != "none"
+                                  ? std::string(I(ic::volume)) + "  " + s.narration
+                                  : std::string(I(ic::type)) + "  " + (s.title.empty() ? s.text : s.title);
             dl->PushClipRect(sa, sb2, true);
             draw_text(dl, F.tiny, ImVec2(sa.x + P(8), (sa.y + sb2.y - F.tiny->FontSize) * 0.5f), sel ? kText : kSoft,
                       fit(F.tiny, cap, sb2.x - sa.x - P(14)).c_str());
@@ -3919,6 +4062,7 @@ void run_app(const Launch& launch) {
     app.window = window;
     app.cfg = load_config();
     app.plan_api = app.cfg.use_api;
+    app.voices = list_voices();
     if (const GLubyte* r = glGetString(GL_RENDERER)) {
         std::string name = reinterpret_cast<const char*>(r);
         auto slash = name.find('/');

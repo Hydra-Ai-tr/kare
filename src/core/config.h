@@ -19,6 +19,7 @@ struct Config {
 };
 
 std::string config_path();
+std::string data_dir();
 Config load_config();
 void save_config(const Config& cfg);
 std::string default_export_path();

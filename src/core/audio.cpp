@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "core/render.h"
+#include "core/tts.h"
 
 namespace kare {
 
@@ -377,7 +378,7 @@ double beat_seconds(const Storyboard& board) {
 
 void snap_to_beat(Storyboard& board, double target_seconds) {
     std::string mood = resolve_music(board);
-    if (mood == "none" || board.scenes.empty()) return;
+    if (mood == "none" || board.scenes.empty() || has_narration(board)) return;
     double base = 60.0 / music_bpm(mood);
     double target = target_seconds > 0 ? target_seconds : total_seconds(board);
     int n = static_cast<int>(board.scenes.size());
@@ -405,10 +406,10 @@ void snap_to_beat(Storyboard& board, double target_seconds) {
         give[static_cast<size_t>(best)]++;
         used++;
     }
-    for (int i = 0; i < n; i++) board.scenes[static_cast<size_t>(i)].seconds = std::min(20.0, give[static_cast<size_t>(i)] * unit);
+    for (int i = 0; i < n; i++) board.scenes[static_cast<size_t>(i)].seconds = std::min(kMaxSceneSeconds, give[static_cast<size_t>(i)] * unit);
 }
 
-std::vector<int16_t> render_soundtrack(const Storyboard& input) {
+static std::vector<int16_t> render_music(const Storyboard& input) {
     Storyboard b = input;
     normalize(b);
     std::string mood_id = resolve_music(b);
@@ -614,6 +615,60 @@ std::vector<int16_t> render_soundtrack(const Storyboard& input) {
         float r = std::tanh(R[i] * gain * 1.15f) * f;
         out[i * 2] = static_cast<int16_t>(std::clamp(l, -1.f, 1.f) * 32000.f);
         out[i * 2 + 1] = static_cast<int16_t>(std::clamp(r, -1.f, 1.f) * 32000.f);
+    }
+    return out;
+}
+
+std::vector<int16_t> render_soundtrack(const Storyboard& input) {
+    Storyboard b = input;
+    normalize(b);
+    std::vector<int16_t> music = render_music(b);
+    if (!has_narration(b)) return music;
+    double total = total_seconds(b);
+    size_t n = at(total);
+    if (n < 16) return music;
+
+    std::vector<float> voice(n, 0.f), gate(n, 0.f);
+    double start = 0;
+    for (int i = 0; i < static_cast<int>(b.scenes.size()); i++) {
+        auto clip = scene_voice(b, i);
+        if (clip) {
+            size_t s0 = at(start + kVoiceLead);
+            for (size_t k = 0; k < clip->pcm.size() && s0 + k < n; k++) voice[s0 + k] = clip->pcm[k] / 32768.f;
+            size_t g0 = at(start + kVoiceLead + (clip->words.empty() ? 0.0 : clip->words.front().start) - 0.08);
+            size_t g1 = std::min(n, at(start + kVoiceLead + clip->seconds + 0.12));
+            for (size_t k = g0; k < g1; k++) gate[k] = 1.f;
+        }
+        start += b.scenes[static_cast<size_t>(i)].seconds;
+    }
+
+    std::vector<float> mags;
+    mags.reserve(n / 4 + 1);
+    for (size_t i = 0; i < n; i += 4) mags.push_back(std::fabs(voice[i]));
+    size_t q = mags.size() * 999 / 1000;
+    std::nth_element(mags.begin(), mags.begin() + static_cast<std::ptrdiff_t>(q), mags.end());
+    float vgain = std::min(6.f, 0.86f / std::max(1e-4f, mags[q]));
+
+    // One-pole smoothing: quick duck when speech starts, slow recovery after it ends.
+    const float attack = 1.f - std::exp(-1.f / (0.06f * kAudioRate));
+    const float release = 1.f - std::exp(-1.f / (0.45f * kAudioRate));
+    const float bed = 0.62f, ducked = 0.24f;
+    std::vector<int16_t> out(n * 2);
+    float env = 0.f;
+    auto limit = [](float x) {
+        float a = std::fabs(x);
+        if (a <= 0.9f) return x;
+        float y = 0.9f + 0.1f * std::tanh((a - 0.9f) / 0.1f);
+        return x < 0 ? -y : y;
+    };
+    for (size_t i = 0; i < n; i++) {
+        env += (gate[i] - env) * (gate[i] > env ? attack : release);
+        float mg = bed + (ducked - bed) * env;
+        float v = voice[i] * vgain;
+        float ml = i * 2 < music.size() ? music[i * 2] / 32000.f : 0.f;
+        float mr = i * 2 + 1 < music.size() ? music[i * 2 + 1] / 32000.f : 0.f;
+        out[i * 2] = static_cast<int16_t>(limit(ml * mg + v) * 32000.f);
+        out[i * 2 + 1] = static_cast<int16_t>(limit(mr * mg + v) * 32000.f);
     }
     return out;
 }

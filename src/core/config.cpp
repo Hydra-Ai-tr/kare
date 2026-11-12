@@ -27,6 +27,8 @@ static std::string config_dir() {
 #endif
 }
 
+std::string data_dir() { return config_dir(); }
+
 std::string config_path() {
 #ifdef _WIN32
     return config_dir() + "\\config.json";

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string>
 
 #include "core/story.h"
@@ -18,6 +19,10 @@ struct PlanInput {
     std::string api_key;
     std::string api_model;
     std::string github_token;
+    int web = 0;                  // 1 always research the topic online, -1 never, 0 when the prompt asks for it
+    std::string voice = "auto";   // auto, none, tr, en or an installed voice name
+    bool shorts = false;          // vertical 1080x1920 short
+    std::function<void(const std::string&)> note;  // progress messages while planning
 };
 
 struct PlanResult {
@@ -26,9 +31,11 @@ struct PlanResult {
     bool from_api = false;
     std::string repo;
     std::string repo_note;
+    std::string source;  // researched article URL
 };
 
 PlanResult plan(const PlanInput& in);
+PlanResult plan_plain(const PlanInput& in);
 Storyboard plan_local(const PlanInput& in);
 
 }  // namespace kare

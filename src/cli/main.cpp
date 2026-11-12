@@ -11,7 +11,9 @@
 #include "core/github.h"
 #include "core/render.h"
 #include "core/story.h"
+#include "core/tts.h"
 #include "core/utf8.h"
+#include "core/web.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -271,6 +273,54 @@ int selftest() {
     kare::render_frame(lay, lay.scenes[0].seconds - 0.1, mid);
     expect(!mid.rgba.empty(), "transition frame");
 
+    expect(kare::research_query("Titanik olayını anlatan shorts videosu yap") == "Titanik", "research query tr");
+    expect(kare::research_query("make a short video about the Apollo 11 mission") == "Apollo 11 mission", "research query en");
+    expect(kare::wants_research("Titanik olayını anlatan video"), "wants research");
+    expect(!kare::wants_research("gün batımında sahil, 8 saniye"), "no research for a mood prompt");
+
+    kare::Storyboard doc;
+    doc.width = 360;
+    doc.height = 640;
+    doc.aspect = "9:16";
+    kare::Scene shot;
+    shot.image = temp_path("kare_selftest_story.png");
+    shot.narration = "Bu bir deneme anlatımıdır.";
+    std::vector<uint8_t> px(64 * 48 * 4);
+    for (size_t k = 0; k < px.size(); k++) px[k] = static_cast<uint8_t>((k * 37) & 0xFF);
+    std::string perr;
+    kare::write_png(shot.image, 64, 48, px.data(), perr);
+    doc.scenes.push_back(shot);
+    kare::normalize(doc);
+    expect(kare::resolve_layout(doc, 0) == "story", "layout story");
+    kare::Frame docf;
+    kare::render_frame(doc, 1.0, docf);
+    expect(docf.w == 360 && docf.h == 640, "story frame");
+
+    auto voices = kare::list_voices();
+    std::string voice;
+    for (const auto& v : voices)
+        if (v.lang == "tr") voice = "tr";
+    if (voice.empty() && !voices.empty()) voice = voices.front().name;
+    if (voice.empty()) {
+        std::cout << "skip narration (no speech voice installed)\n";
+    } else {
+        auto clip = kare::narrate("Merhaba, bu Kare.", voice, 0);
+        expect(clip && clip->seconds > 0.4 && !clip->pcm.empty(), "narrate");
+        expect(clip && clip->words.size() >= 2, "narration word timings");
+        doc.voice = voice;
+        doc.music = "none";
+        kare::fit_to_voice(doc);
+        auto voiced = kare::render_soundtrack(doc);
+        int loud = 0;
+        for (int16_t v : voiced)
+            if (v > 3000 || v < -3000) loud++;
+        expect(!voiced.empty() && loud > 100, "narration in soundtrack");
+        expect(std::abs(doc.scenes[0].seconds - (kare::kVoiceLead + clip->seconds)) < 3.0, "scene fits voice");
+    }
+#ifdef _WIN32
+    _wremove(kare::widen(shot.image).c_str());
+#endif
+
 #ifdef _WIN32
     _wremove(kare::widen(mp4).c_str());
     _wremove(kare::widen(avi).c_str());
@@ -282,7 +332,10 @@ int selftest() {
 void usage() {
     std::cout << "Kare " << KARE_VERSION << "\n\n"
               << "kare-cli plan \"prompt\" [-o file.kare] [--seconds N] [--aspect 16:9|9:16|1:1] [--style name] [--api] [--lang tr|en]\n"
+              << "              [--shorts] [--web | --no-web] [--voice auto|none|tr|en|\"voice name\"]\n"
               << "kare-cli plan https://github.com/owner/repo   (inspects the repository)\n"
+              << "kare-cli voices                                (installed narration voices)\n"
+              << "kare-cli research \"topic\" [--lang tr|en]        (what the internet research finds)\n"
               << "kare-cli render \"prompt\" -o video.mp4 [same flags] [--project file.kare]\n"
               << "kare-cli frame \"prompt\" -o frame.png [--at seconds] [--project file.kare]\n"
               << "kare-cli audio \"prompt\" -o music.wav [--project file.kare]\n"
@@ -296,9 +349,12 @@ struct Args {
     std::string aspect;
     std::string style;
     std::string lang;
+    std::string voice = "auto";
     double seconds = 0;
     double at = -1;
     bool api = false;
+    bool shorts = false;
+    int web = 0;
 };
 
 bool take(size_t& i, const std::vector<std::string>& argv, std::string& dest) {
@@ -329,6 +385,14 @@ Args parse_args(const std::vector<std::string>& argv) {
             a.api = true;
         } else if (s == "--lang") {
             take(i, argv, a.lang);
+        } else if (s == "--voice") {
+            take(i, argv, a.voice);
+        } else if (s == "--shorts") {
+            a.shorts = true;
+        } else if (s == "--web") {
+            a.web = 1;
+        } else if (s == "--no-web") {
+            a.web = -1;
         } else {
             if (!a.prompt.empty()) a.prompt.push_back(' ');
             a.prompt += s;
@@ -346,6 +410,10 @@ kare::PlanInput to_input(const Args& a) {
     kare::Config cfg = kare::load_config();
     in.lang = a.lang.empty() ? cfg.lang : a.lang;
     in.github_token = cfg.github_token;
+    in.voice = a.voice;
+    in.shorts = a.shorts;
+    in.web = a.web;
+    in.note = [](const std::string& m) { std::cerr << m << "\n"; };
     if (a.api) {
         in.use_api = true;
         in.api_base = cfg.api_base;
@@ -392,8 +460,26 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (cmd == "selftest") return selftest();
+    if (cmd == "voices") {
+        for (const auto& v : kare::list_voices()) std::cout << (v.lang.empty() ? "??" : v.lang) << "  " << v.name << "\n";
+        return 0;
+    }
 
     Args options = parse_args(args);
+    if (cmd == "research") {
+        std::string lang = options.lang.empty() ? "tr" : options.lang;
+        auto r = kare::research_topic(kare::research_query(options.prompt), lang, lang, 16,
+                                      [](const std::string& m) { std::cerr << m << "\n"; });
+        if (!r.ok()) {
+            std::cerr << r.error << "\n";
+            return 1;
+        }
+        std::cout << r.title << "  " << r.url << "\n\n" << r.intro << "\n";
+        for (const auto& s : r.sections) std::cout << "\n== " << s.heading << " (" << s.text.size() << " bytes)\n";
+        std::cout << "\n";
+        for (const auto& im : r.images) std::cout << im.w << "x" << im.h << "  " << im.file << "  " << im.caption << "\n";
+        return 0;
+    }
     if (cmd == "plan") {
         auto result = kare::plan(to_input(options));
         if (!result.warning.empty()) std::cerr << result.warning << "\n";

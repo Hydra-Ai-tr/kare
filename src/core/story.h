@@ -5,7 +5,9 @@
 
 namespace kare {
 
-constexpr int kMaxScenes = 16;
+constexpr int kMaxScenes = 24;
+constexpr double kMaxSceneSeconds = 30.0;
+constexpr double kMaxTotalSeconds = 180.0;
 
 struct Scene {
     std::string title;
@@ -18,6 +20,7 @@ struct Scene {
     std::string anim = "auto";
     std::string kicker;
     std::string image;
+    std::string narration;
 };
 
 struct Storyboard {
@@ -31,8 +34,15 @@ struct Storyboard {
     bool mark = true;
     std::string music = "auto";
     bool grain = true;
+    std::string voice = "none";
+    int voice_rate = 0;
+    std::string captions = "auto";
+    std::string credits;
     std::vector<Scene> scenes;
 };
+
+bool has_narration(const Storyboard& board);
+const std::vector<std::string>& caption_ids();
 
 double total_seconds(const Storyboard& board);
 void apply_aspect_size(Storyboard& board);

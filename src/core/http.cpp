@@ -44,7 +44,7 @@ HttpResult http_request(const std::string& method, const std::string& url, const
                         const std::string& headers, int timeout_ms, size_t max_bytes) {
     HttpResult r;
     Handle ses;
-    std::wstring agent = widen(std::string("Kare/") + KARE_VERSION);
+    std::wstring agent = widen(std::string("Kare/") + KARE_VERSION + " (https://github.com/Hydra-Ai-tr/kare)");
     ses.h = WinHttpOpen(agent.c_str(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
                         WINHTTP_NO_PROXY_BYPASS, 0);
     if (!ses.h) {
